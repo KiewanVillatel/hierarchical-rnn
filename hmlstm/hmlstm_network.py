@@ -12,6 +12,7 @@ class HMLSTMNetwork(object):
                  output_size=1,
                  num_layers=3,
                  hidden_state_sizes=50,
+                 num_hidden_layers=2,
                  out_hidden_size=100,
                  embed_size=100,
                  task='regression'):
@@ -29,7 +30,8 @@ class HMLSTMNetwork(object):
             If it is a list, it must have length equal to the number of layers,
             and each integer of the list is the size of the hidden state for
             the layer correspodning to its index.
-        out_hidden_size: integer, the size of the two hidden layers in the
+        num_hidden_layers: the number of hidden layers in the output network
+        out_hidden_size: integer, the size of the hidden layers in the
             output network.
         embed_size: integer, the size of the embedding in the output network.
         task: string, one of 'regression' and 'classification'.
@@ -38,6 +40,7 @@ class HMLSTMNetwork(object):
         self._out_hidden_size = out_hidden_size
         self._embed_size = embed_size
         self._num_layers = num_layers
+        self._num_hidden_layers = num_hidden_layers
         self._input_size = input_size
         self._session = None
         self._graph = None
@@ -94,18 +97,15 @@ class HMLSTMNetwork(object):
 
     def _initialize_output_variables(self):
         with vs.variable_scope('output_module_vars'):
-            vs.get_variable('b1', [1, self._out_hidden_size], dtype=tf.float32)
-            vs.get_variable('b2', [1, self._out_hidden_size], dtype=tf.float32)
-            vs.get_variable('b3', [1, self._output_size], dtype=tf.float32)
-            vs.get_variable(
-                'w1', [self._embed_size, self._out_hidden_size],
-                dtype=tf.float32)
-            vs.get_variable(
-                'w2', [self._out_hidden_size, self._out_hidden_size],
-                dtype=tf.float32)
-            vs.get_variable(
-                'w3', [self._out_hidden_size, self._output_size],
-                dtype=tf.float32)
+            for i in range(0, self._num_hidden_layers):
+                b_var_name = 'b' + str(i + 1)
+                b_size = self._out_hidden_size if i != self._num_hidden_layers-1 else self._output_size
+                vs.get_variable(b_var_name, [1, b_size], dtype=tf.float32)
+
+                w_var_name = 'w' + str(i + 1)
+                w_in_size = self._embed_size if i == 0 else self._out_hidden_size
+                w_out_size = self._output_size if i == self._num_hidden_layers-1 else self._out_hidden_size
+                vs.get_variable( w_var_name, [w_in_size, w_out_size], dtype=tf.float32)
 
     def load_variables(self, path='./hmlstm_ckpt'):
         if self._session is None:
@@ -168,23 +168,23 @@ class HMLSTMNetwork(object):
         prediction: [B, output_size]
         '''
         with vs.variable_scope('output_module_vars', reuse=True):
-            b1 = vs.get_variable('b1')
-            b2 = vs.get_variable('b2')
-            b3 = vs.get_variable('b3')
-            w1 = vs.get_variable('w1')
-            w2 = vs.get_variable('w2')
-            w3 = vs.get_variable('w3')
-
             # feed forward network
-            # first layer
-            l1 = tf.nn.tanh(tf.matmul(embedding, w1) + b1)
+            l = []
+            for i in range(0, self._num_hidden_layers):
+                inputs = embedding if i == 0 else l[i-1]
+                w = vs.get_variable('w' + str(i+1))
+                b = vs.get_variable('b' + str(i + 1))
+                _l = tf.matmul(inputs, w) + b
+                if i != self._num_hidden_layers - 1:
+                    _l = tf.nn.tanh(_l)
+                l.append(_l)
 
-            # second layer
-            l2 = tf.nn.tanh(tf.matmul(l1, w2) + b2)
+            prediction = tf.identity(l[self._num_hidden_layers-1], name='prediction')
+
+            # first layer
 
             # the loss function used below
             # softmax_cross_entropy_with_logits
-            prediction = tf.add(tf.matmul(l2, w3), b3, name='prediction')
 
             loss_args = {'logits': prediction, 'labels': outcome}
             loss = self._loss_function(**loss_args)
@@ -379,6 +379,7 @@ class HMLSTMNetwork(object):
         returns:
         ---
         predictions for the batch
+        embeddings of the last timesteps for the batch
         """
 
         batch = np.array(batch)
