@@ -45,7 +45,7 @@ class HMLSTMNetwork(object):
         self._output_size = output_size
 
         if type(hidden_state_sizes) is list \
-            and len(hidden_state_sizes) != num_layers:
+                and len(hidden_state_sizes) != num_layers:
             raise ValueError('The number of hidden states provided must be the'
                              + ' same as the nubmer of layers.')
 
@@ -66,7 +66,16 @@ class HMLSTMNetwork(object):
         self.batch_out = tf.placeholder(
             tf.float32, shape=batch_out_shape, name='batch_out')
 
-        self._optimizer = tf.train.AdamOptimizer(1e-3)
+        self.global_step = tf.get_variable('global_step', [], initializer=tf.constant_initializer(0), trainable=False)
+        starter_learning_rate = 0.1
+        end_learning_rate = 0.0001
+        decay_steps = 100000
+        learning_rate = tf.train.polynomial_decay(starter_learning_rate, self.global_step,
+                                                  decay_steps, end_learning_rate,
+                                                  power=0.5)
+        self._optimizer = tf.train.AdamOptimizer(learning_rate)
+
+        #self._optimizer = tf.train.AdamOptimizer(1e-3)
         self._initialize_output_variables()
         self._initialize_gate_variables()
         self._initialize_embedding_variables()
@@ -257,27 +266,28 @@ class HMLSTMNetwork(object):
             cell_states = self.split_out_cell_states(accum)
 
             h_aboves = self.get_h_aboves([cs.h for cs in cell_states],
-                                         batch_size, hmlstm)    # [B, sum(ha_l)]
+                                         batch_size, hmlstm)  # [B, sum(ha_l)]
             # [B, I] + [B, sum(ha_l)] -> [B, I + sum(ha_l)]
             hmlstm_in = array_ops.concat((elem, h_aboves), axis=1)
             _, state = hmlstm(hmlstm_in, cell_states)
             # a list of (c=[B, h_l], h=[B, h_l], z=[B, 1]) ->
             # a list of [B, h_l + h_l + 1]
             concated_states = [array_ops.concat(tuple(s), axis=1) for s in state]
-            return array_ops.concat(concated_states, axis=1)    # [B, H]
+            return array_ops.concat(concated_states, axis=1)  # [B, H]
+
         # denote 'elem_len' as 'H'
         elem_len = (sum(self._hidden_state_sizes) * 2) + self._num_layers
-        initial = tf.zeros([batch_size, elem_len])              # [B, H]
+        initial = tf.zeros([batch_size, elem_len])  # [B, H]
 
-        states = tf.scan(scan_rnn, self.batch_in, initial)      # [T, B, H]
+        states = tf.scan(scan_rnn, self.batch_in, initial)  # [T, B, H]
 
         def map_indicators(elem):
             state = self.split_out_cell_states(elem)
             return tf.concat([l.z for l in state], axis=1)
 
-        raw_indicators = tf.map_fn(map_indicators, states)      # [T, B, L]
-        indicators = tf.transpose(raw_indicators, [1, 2, 0])    # [B, L, T]
-        to_map = tf.concat((states, self.batch_out), axis=2)    # [T, B, H + O]
+        raw_indicators = tf.map_fn(map_indicators, states)  # [T, B, L]
+        indicators = tf.transpose(raw_indicators, [1, 2, 0])  # [B, L, T]
+        to_map = tf.concat((states, self.batch_out), axis=2)  # [T, B, H + O]
 
         def map_output(elem):
             splits = tf.constant([elem_len, self._output_size])
@@ -286,20 +296,21 @@ class HMLSTMNetwork(object):
                                                    axis=1)
 
             hs = [s.h for s in self.split_out_cell_states(cell_states)]
-            gated = self.gate_input(tf.concat(hs, axis=1))      # [B, sum(h_l)]
-            embeded = self.embed_input(gated)                   # [B, E]
+            gated = self.gate_input(tf.concat(hs, axis=1))  # [B, sum(h_l)]
+            embeded = self.embed_input(gated)  # [B, E]
             loss, prediction = self.output_module(embeded, outcome)
-            # [B, output_size * 2] or [B, 1 + output_size]
-            return tf.concat((loss, prediction), axis=1)
+            # [B, embeded_size + output_size * 2] or [B, embeded_size + 1 + output_size]
+            return tf.concat((embeded, loss, prediction), axis=1)
 
-        mapped = tf.map_fn(map_output, to_map)                  # [T, B, _]
+        mapped = tf.map_fn(map_output, to_map)  # [T, B, _]
 
         # mapped has diffenent shape for task 'regression' and 'classification'
-        loss = tf.reduce_mean(mapped[:, :, :-self._output_size])  # scalar
+        embeded = mapped[:, :, :self._embed_size]
+        loss = tf.reduce_mean(mapped[:, :, self._embed_size:-self._output_size])  # scalar
         predictions = mapped[:, :, -self._output_size:]
-        train = self._optimizer.minimize(loss)
+        train = self._optimizer.minimize(loss, global_step=self.global_step)
 
-        return train, loss, indicators, predictions
+        return train, loss, indicators, predictions, embeded
 
     def train(self,
               batches_in,
@@ -307,7 +318,8 @@ class HMLSTMNetwork(object):
               variable_path='./hmlstm_ckpt',
               load_vars_from_disk=False,
               save_vars_to_disk=False,
-              epochs=3):
+              epochs=3,
+              verbose=False):
         """
         Train the network.
 
@@ -326,11 +338,10 @@ class HMLSTMNetwork(object):
         epochs: integer, number of epochs
         """
 
-        optim, loss, _, _ = self._get_graph()
+        optim, loss, _, _, _ = self._get_graph()
 
         if not load_vars_from_disk:
             if self._session is None:
-
                 self._session = tf.Session()
                 init = tf.global_variables_initializer()
                 self._session.run(init)
@@ -338,7 +349,7 @@ class HMLSTMNetwork(object):
             self.load_variables(variable_path)
 
         for epoch in range(epochs):
-            print('Epoch %d' % epoch)
+            if verbose: print('Epoch %d' % epoch)
             for batch_in, batch_out in zip(batches_in, batches_out):
                 ops = [optim, loss]
                 feed_dict = {
@@ -346,7 +357,7 @@ class HMLSTMNetwork(object):
                     self.batch_out: np.swapaxes(batch_out, 0, 1),
                 }
                 _, _loss = self._session.run(ops, feed_dict)
-                print('loss:', _loss)
+                if verbose: print('loss:', _loss)
 
         self.save_variables(variable_path)
 
@@ -371,23 +382,26 @@ class HMLSTMNetwork(object):
         """
 
         batch = np.array(batch)
-        _, _, _, predictions = self._get_graph()
+        _, _, _, predictions, embeddings = self._get_graph()
 
         self._load_vars(variable_path)
 
         # batch_out is not used for prediction, but needs to be fed in
         batch_out_size = (batch.shape[1], batch.shape[0], self._output_size)
         gradients = tf.gradients(predictions[-1:, :], self.batch_in)
-        _predictions, _gradients = self._session.run([predictions, gradients], {
+        _predictions, _gradients, _embeddings = self._session.run([predictions, gradients, embeddings], {
             self.batch_in: np.swapaxes(batch, 0, 1),
             self.batch_out: np.zeros(batch_out_size),
         })
+
+        _embeddings = _embeddings[-1:, :, :]
+        _embeddings = np.reshape(_embeddings, (_embeddings.shape[1], _embeddings.shape[2]))
 
         if return_gradients:
             return tuple(np.swapaxes(r, 0, 1) for
                          r in (_predictions, _gradients[0]))
 
-        return np.swapaxes(_predictions, 0, 1)
+        return np.swapaxes(_predictions, 0, 1), _embeddings
 
     def predict_boundaries(self, batch, variable_path='./hmlstm_ckpt'):
         """
@@ -409,7 +423,7 @@ class HMLSTMNetwork(object):
         """
 
         batch = np.array(batch)
-        _, _, indicators, _ = self._get_graph()
+        _, _, indicators, _, _ = self._get_graph()
 
         self._load_vars(variable_path)
 
