@@ -8,6 +8,7 @@ import numpy as np
 
 class HMLSTMNetwork(object):
     def __init__(self,
+                 max_seq_length,
                  input_size=1,
                  output_size=1,
                  num_layers=3,
@@ -37,6 +38,7 @@ class HMLSTMNetwork(object):
         task: string, one of 'regression' and 'classification'.
         """
 
+        self._max_seq_length = max_seq_length
         self._out_hidden_size = out_hidden_size
         self._embed_size = embed_size
         self._num_layers = num_layers
@@ -59,7 +61,9 @@ class HMLSTMNetwork(object):
 
         if task == 'classification':
             self._loss_function = tf.nn.softmax_cross_entropy_with_logits
+            print('classification')
         elif task == 'regression':
+            print('regression')
             self._loss_function = lambda logits, labels: tf.square((logits - labels))
 
         batch_in_shape = (None, None, self._input_size)
@@ -68,6 +72,7 @@ class HMLSTMNetwork(object):
             tf.float32, shape=batch_in_shape, name='batch_in')
         self.batch_out = tf.placeholder(
             tf.float32, shape=batch_out_shape, name='batch_out')
+        self.lengths = tf.placeholder(tf.int32, shape=(None,))
 
         self.global_step = tf.get_variable('global_step', [], initializer=tf.constant_initializer(0), trainable=False)
         starter_learning_rate = 0.1
@@ -169,17 +174,17 @@ class HMLSTMNetwork(object):
         '''
         with vs.variable_scope('output_module_vars', reuse=True):
             # feed forward network
-            l = []
+            _layers = []
             for i in range(0, self._num_hidden_layers):
-                inputs = embedding if i == 0 else l[i-1]
+                inputs = embedding if i == 0 else _layers[i-1]
                 w = vs.get_variable('w' + str(i+1))
                 b = vs.get_variable('b' + str(i + 1))
                 _l = tf.matmul(inputs, w) + b
                 if i != self._num_hidden_layers - 1:
                     _l = tf.nn.tanh(_l)
-                l.append(_l)
+                _layers.append(_l)
 
-            prediction = tf.identity(l[self._num_hidden_layers-1], name='prediction')
+            prediction = tf.identity(_layers[self._num_hidden_layers-1], name='prediction')
 
             # first layer
 
@@ -306,7 +311,12 @@ class HMLSTMNetwork(object):
 
         # mapped has diffenent shape for task 'regression' and 'classification'
         embeded = mapped[:, :, :self._embed_size]
-        loss = tf.reduce_mean(mapped[:, :, self._embed_size:-self._output_size])  # scalar
+        loss = mapped[:, :, self._embed_size:-self._output_size]  # scalar
+        loss = tf.transpose(loss, [1, 0, 2])
+        loss = tf.reshape(loss, [-1, self._max_seq_length])
+        sequence_mask = tf.sequence_mask(tf.to_int32(self.lengths), maxlen=self._max_seq_length, dtype=tf.float32)
+        loss = tf.multiply(loss, sequence_mask)
+        loss = tf.reduce_mean(loss)
         predictions = mapped[:, :, -self._output_size:]
         train = self._optimizer.minimize(loss, global_step=self.global_step)
 
@@ -315,6 +325,7 @@ class HMLSTMNetwork(object):
     def train(self,
               batches_in,
               batches_out,
+              batches_seq_lengths,
               variable_path='./hmlstm_ckpt',
               load_vars_from_disk=False,
               save_vars_to_disk=False,
@@ -350,11 +361,12 @@ class HMLSTMNetwork(object):
 
         for epoch in range(epochs):
             if verbose: print('Epoch %d' % epoch)
-            for batch_in, batch_out in zip(batches_in, batches_out):
+            for batch_in, batch_out, seq_lengths in zip(batches_in, batches_out, batches_seq_lengths):
                 ops = [optim, loss]
                 feed_dict = {
                     self.batch_in: np.swapaxes(batch_in, 0, 1),
                     self.batch_out: np.swapaxes(batch_out, 0, 1),
+                    self.lengths: seq_lengths
                 }
                 _, _loss = self._session.run(ops, feed_dict)
                 if verbose: print('loss:', _loss)
@@ -395,14 +407,11 @@ class HMLSTMNetwork(object):
             self.batch_out: np.zeros(batch_out_size),
         })
 
-        _embeddings = _embeddings[-1:, :, :]
-        _embeddings = np.reshape(_embeddings, (_embeddings.shape[1], _embeddings.shape[2]))
-
         if return_gradients:
             return tuple(np.swapaxes(r, 0, 1) for
                          r in (_predictions, _gradients[0]))
 
-        return np.swapaxes(_predictions, 0, 1), _embeddings
+        return np.swapaxes(_predictions, 0, 1), np.swapaxes(_embeddings, 0, 1)
 
     def predict_boundaries(self, batch, variable_path='./hmlstm_ckpt'):
         """
