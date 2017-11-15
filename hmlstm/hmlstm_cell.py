@@ -2,6 +2,9 @@ from tensorflow.python.framework import ops
 from tensorflow.python.ops import array_ops
 from tensorflow.python.ops import rnn_cell_impl
 import tensorflow as tf
+from tensorflow.python.ops import variable_scope as vs
+from tensorflow.python.ops import init_ops
+from tensorflow.contrib.layers.python.layers import layers
 import collections
 
 
@@ -10,12 +13,15 @@ HMLSTMState = collections.namedtuple('HMLSTMCellState', ['c', 'h', 'z'])
 
 class HMLSTMCell(rnn_cell_impl.RNNCell):
     def __init__(self, num_units, batch_size, h_below_size, h_above_size,
-                 reuse):
+                 reuse, layer_norm=True, layer_norm_gain=1.0, layer_norm_shift=0.0):
         super(HMLSTMCell, self).__init__(_reuse=reuse)
         self._num_units = num_units
         self._h_below_size = h_below_size
         self._h_above_size = h_above_size
         self._batch_size = batch_size
+        self._layer_norm = layer_norm
+        self._layer_norm_g = layer_norm_gain
+        self._layer_norm_b = layer_norm_shift
 
     @property
     def state_size(self):
@@ -66,7 +72,7 @@ class HMLSTMCell(rnn_cell_impl.RNNCell):
 
         bias_init = tf.constant_initializer(-1e5, dtype=tf.float32)
         # [B, 4 * h_l + 1]
-        concat = rnn_cell_impl._linear(states, length, bias=False,
+        concat = rnn_cell_impl._linear(states, length, bias=True,
                                        bias_initializer=bias_init)
 
         gate_splits = tf.constant(
@@ -75,10 +81,10 @@ class HMLSTMCell(rnn_cell_impl.RNNCell):
         i, g, f, o, z_tilde = array_ops.split(
             value=concat, num_or_size_splits=gate_splits, axis=1)
 
-        i = tf.sigmoid(i)           # [B, h_l]
-        g = tf.tanh(g)              # [B, h_l]
-        f = tf.sigmoid(f)           # [B, h_l]
-        o = tf.sigmoid(o)           # [B, h_l]
+        i = tf.sigmoid(self._norm(i, 'i'))           # [B, h_l]
+        g = tf.tanh(self._norm(g, 'g'))              # [B, h_l]
+        f = tf.sigmoid(self._norm(f, 'f'))           # [B, h_l]
+        o = tf.sigmoid(self._norm(o, 'o'))           # [B, h_l]
 
         new_c = self.calculate_new_cell_state(c, g, i, f, z, zb)
         new_h = self.calculate_new_hidden_state(h, o, new_c, z, zb)
@@ -88,6 +94,28 @@ class HMLSTMCell(rnn_cell_impl.RNNCell):
         new_state = HMLSTMState(c=new_c, h=new_h, z=new_z)
 
         return output, new_state
+
+    def _linear(self, args, scope):
+        out_size = self._num_units
+        proj_size = args.get_shape()[-1]
+        with vs.variable_scope(scope):
+            weights = vs.get_variable("kernel", [proj_size, out_size])
+            out = math_ops.matmul(args, weights)
+            if not self._layer_norm:
+                bias = vs.get_variable("bias", [out_size])
+                out = nn_ops.bias_add(out, bias)
+        return out
+
+    def _norm(self, inp, scope):
+        shape = inp.get_shape()[-1:]
+        gamma_init = init_ops.constant_initializer(self._layer_norm_g)
+        beta_init = init_ops.constant_initializer(self._layer_norm_b)
+        with vs.variable_scope(scope):
+            # Initialize beta and gamma for use by layer_norm.
+            vs.get_variable("gamma", shape=shape, initializer=gamma_init)
+            vs.get_variable("beta", shape=shape, initializer=beta_init)
+        normalized = layers.layer_norm(inp, reuse=True, scope=scope)
+        return normalized
 
     def calculate_new_cell_state(self, c, g, i, f, z, zb):
         '''
@@ -126,7 +154,7 @@ class HMLSTMCell(rnn_cell_impl.RNNCell):
                 tf.equal(zb, tf.constant(0., dtype=tf.float32))
             ),                                  # [B]
             tf.identity(h),                     # [B, h_l], if copy
-            tf.multiply(o, tf.tanh(new_c))      # [B, h_l], otherwise
+            tf.multiply(o, tf.tanh(self._norm(new_c, 'new_c')))      # [B, h_l], otherwise
         )
         return new_h                            # [B, h_l]
 
