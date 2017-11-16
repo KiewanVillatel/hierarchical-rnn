@@ -16,7 +16,8 @@ class HMLSTMNetwork(object):
                  num_hidden_layers=2,
                  out_hidden_size=100,
                  embed_size=100,
-                 task='regression'):
+                 task='regression',
+                 layer_norm=True):
         """
         HMLSTMNetwork is a class representing hierarchical multiscale
         long short-term memory network.
@@ -48,6 +49,7 @@ class HMLSTMNetwork(object):
         self._graph = None
         self._task = task
         self._output_size = output_size
+        self._layer_norm = layer_norm
 
         if type(hidden_state_sizes) is list \
                 and len(hidden_state_sizes) != num_layers:
@@ -61,9 +63,7 @@ class HMLSTMNetwork(object):
 
         if task == 'classification':
             self._loss_function = tf.nn.softmax_cross_entropy_with_logits
-            print('classification')
         elif task == 'regression':
-            print('regression')
             self._loss_function = lambda logits, labels: tf.square((logits - labels))
 
         batch_in_shape = (None, None, self._input_size)
@@ -215,7 +215,7 @@ class HMLSTMNetwork(object):
                 h_above_size = self._hidden_state_sizes[layer + 1]
 
             return HMLSTMCell(self._hidden_state_sizes[layer], batch_size,
-                              h_below_size, h_above_size, reuse)
+                              h_below_size, h_above_size, reuse, layer_norm=self._layer_norm)
 
         hmlstm = MultiHMLSTMCell(
             [hmlstm_cell(l) for l in range(self._num_layers)], reuse)
@@ -307,6 +307,13 @@ class HMLSTMNetwork(object):
             # [B, embeded_size + output_size * 2] or [B, embeded_size + 1 + output_size]
             return tf.concat((embeded, loss, prediction), axis=1)
 
+        def map_extract_layer_h(elem):
+            hs = [s.h for s in self.split_out_cell_states(elem)]
+            hs = tf.stack(hs, axis=1)  # [B, num_layers, h_l]
+            return hs
+
+        hs = tf.map_fn(map_extract_layer_h, states)                # [T, B, num_layers, h_l]
+
         mapped = tf.map_fn(map_output, to_map)  # [T, B, _]
 
         # mapped has diffenent shape for task 'regression' and 'classification'
@@ -320,7 +327,7 @@ class HMLSTMNetwork(object):
         predictions = mapped[:, :, -self._output_size:]
         train = self._optimizer.minimize(loss, global_step=self.global_step)
 
-        return train, loss, indicators, predictions, embeded
+        return train, loss, indicators, predictions, embeded, hs
 
     def train(self,
               batches_in,
@@ -349,7 +356,7 @@ class HMLSTMNetwork(object):
         epochs: integer, number of epochs
         """
 
-        optim, loss, _, _, _ = self._get_graph()
+        optim, loss, _, _, _, _ = self._get_graph()
 
         if not load_vars_from_disk:
             if self._session is None:
@@ -395,14 +402,14 @@ class HMLSTMNetwork(object):
         """
 
         batch = np.array(batch)
-        _, _, _, predictions, embeddings = self._get_graph()
+        _, _, _, predictions, embeddings, states = self._get_graph()
 
         self._load_vars(variable_path)
 
         # batch_out is not used for prediction, but needs to be fed in
         batch_out_size = (batch.shape[1], batch.shape[0], self._output_size)
         gradients = tf.gradients(predictions[-1:, :], self.batch_in)
-        _predictions, _gradients, _embeddings = self._session.run([predictions, gradients, embeddings], {
+        _predictions, _gradients, _embeddings, _states = self._session.run([predictions, gradients, embeddings, states], {
             self.batch_in: np.swapaxes(batch, 0, 1),
             self.batch_out: np.zeros(batch_out_size),
         })
@@ -411,7 +418,7 @@ class HMLSTMNetwork(object):
             return tuple(np.swapaxes(r, 0, 1) for
                          r in (_predictions, _gradients[0]))
 
-        return np.swapaxes(_predictions, 0, 1), np.swapaxes(_embeddings, 0, 1)
+        return np.swapaxes(_predictions, 0, 1), np.swapaxes(_embeddings, 0, 1), np.swapaxes(_states, 0, 1)
 
     def predict_boundaries(self, batch, variable_path='./hmlstm_ckpt'):
         """
@@ -433,7 +440,7 @@ class HMLSTMNetwork(object):
         """
 
         batch = np.array(batch)
-        _, _, indicators, _, _ = self._get_graph()
+        _, _, indicators, _, _, _ = self._get_graph()
 
         self._load_vars(variable_path)
 
