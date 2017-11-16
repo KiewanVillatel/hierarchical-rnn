@@ -70,7 +70,7 @@ class HMLSTMCell(rnn_cell_impl.RNNCell):
         length = 4 * self._num_units + 1
         states = [s_recurrent, s_above, s_below]
 
-        bias_init = tf.constant_initializer(-1e5, dtype=tf.float32)
+        bias_init = tf.constant_initializer(0, dtype=tf.float32)
         # [B, 4 * h_l + 1]
         concat = rnn_cell_impl._linear(states, length, bias=True,
                                        bias_initializer=bias_init)
@@ -81,10 +81,16 @@ class HMLSTMCell(rnn_cell_impl.RNNCell):
         i, g, f, o, z_tilde = array_ops.split(
             value=concat, num_or_size_splits=gate_splits, axis=1)
 
-        i = tf.sigmoid(self._norm(i, 'i'))           # [B, h_l]
-        g = tf.tanh(self._norm(g, 'g'))              # [B, h_l]
-        f = tf.sigmoid(self._norm(f, 'f'))           # [B, h_l]
-        o = tf.sigmoid(self._norm(o, 'o'))           # [B, h_l]
+        if self._layer_norm:
+            i = self._norm(i, 'i')  # [B, h_l]
+            g = self._norm(g, 'g')  # [B, h_l]
+            f = self._norm(f, 'f')  # [B, h_l]
+            o = self._norm(o, 'o')  # [B, h_l]
+
+        i = tf.sigmoid(i)           # [B, h_l]
+        g = tf.tanh(g)              # [B, h_l]
+        f = tf.sigmoid(f)           # [B, h_l]
+        o = tf.sigmoid(o)           # [B, h_l]
 
         new_c = self.calculate_new_cell_state(c, g, i, f, z, zb)
         new_h = self.calculate_new_hidden_state(h, o, new_c, z, zb)
@@ -94,17 +100,6 @@ class HMLSTMCell(rnn_cell_impl.RNNCell):
         new_state = HMLSTMState(c=new_c, h=new_h, z=new_z)
 
         return output, new_state
-
-    def _linear(self, args, scope):
-        out_size = self._num_units
-        proj_size = args.get_shape()[-1]
-        with vs.variable_scope(scope):
-            weights = vs.get_variable("kernel", [proj_size, out_size])
-            out = math_ops.matmul(args, weights)
-            if not self._layer_norm:
-                bias = vs.get_variable("bias", [out_size])
-                out = nn_ops.bias_add(out, bias)
-        return out
 
     def _norm(self, inp, scope):
         shape = inp.get_shape()[-1:]
@@ -154,7 +149,7 @@ class HMLSTMCell(rnn_cell_impl.RNNCell):
                 tf.equal(zb, tf.constant(0., dtype=tf.float32))
             ),                                  # [B]
             tf.identity(h),                     # [B, h_l], if copy
-            tf.multiply(o, tf.tanh(self._norm(new_c, 'new_c')))      # [B, h_l], otherwise
+            tf.multiply(o, tf.tanh(self._norm(new_c, 'new_c') if self._layer_norm else new_c))      # [B, h_l], otherwise
         )
         return new_h                            # [B, h_l]
 
