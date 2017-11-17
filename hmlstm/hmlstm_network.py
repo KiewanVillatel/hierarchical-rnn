@@ -309,22 +309,26 @@ class HMLSTMNetwork(object):
 
         def map_extract_layer_h(elem):
             hs = [s.h for s in self.split_out_cell_states(elem)]
-            hs = tf.stack(hs, axis=1)  # [B, num_layers, h_l]
+            hs = tf.concat(hs, axis=1)  # [B,  sum(h_l)]
             return hs
 
-        hs = tf.map_fn(map_extract_layer_h, states)                # [T, B, num_layers, h_l]
+        hs = tf.map_fn(map_extract_layer_h, states)                # [T, B, sum(h_l)]
+        hs = tf.transpose(hs, [1, 0, 2])
+        hs = tf.split(hs, self._hidden_state_sizes, axis=2)        # List([T, B, h_l])
 
         mapped = tf.map_fn(map_output, to_map)  # [T, B, _]
 
         # mapped has diffenent shape for task 'regression' and 'classification'
         embeded = mapped[:, :, :self._embed_size]
-        loss = mapped[:, :, self._embed_size:-self._output_size]  # scalar
-        loss = tf.transpose(loss, [1, 0, 2])
-        loss = tf.reshape(loss, [-1, self._max_seq_length])
-        sequence_mask = tf.sequence_mask(tf.to_int32(self.lengths), maxlen=self._max_seq_length, dtype=tf.float32)
-        loss = tf.multiply(loss, sequence_mask)
-        loss = tf.reduce_mean(loss)
-        predictions = mapped[:, :, -self._output_size:]
+        loss = mapped[:, :, self._embed_size:-self._output_size]  # [T, B, 1]
+        loss = tf.transpose(loss, [1, 0, 2])                      # [B, T, 1]
+        loss = tf.reshape(loss, [-1, self._max_seq_length])       # [B, T]
+        sequence_mask = tf.sequence_mask(tf.to_int32(self.lengths), maxlen=self._max_seq_length, dtype=tf.float32) # [B, T]
+        loss = tf.multiply(loss, sequence_mask)                   # [B, T]
+        loss = tf.reduce_mean(loss)                               # [1]
+        regularization = 0 # 0.0000000001*tf.reduce_mean(indicators)
+        loss = loss + regularization
+        predictions = mapped[:, :, -self._output_size:]           # [T, B, output_size]
         train = self._optimizer.minimize(loss, global_step=self.global_step)
 
         return train, loss, indicators, predictions, embeded, hs
@@ -418,7 +422,7 @@ class HMLSTMNetwork(object):
             return tuple(np.swapaxes(r, 0, 1) for
                          r in (_predictions, _gradients[0]))
 
-        return np.swapaxes(_predictions, 0, 1), np.swapaxes(_embeddings, 0, 1), np.swapaxes(_states, 0, 1)
+        return np.swapaxes(_predictions, 0, 1), np.swapaxes(_embeddings, 0, 1), _states
 
     def predict_boundaries(self, batch, variable_path='./hmlstm_ckpt'):
         """
