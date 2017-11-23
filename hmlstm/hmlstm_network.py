@@ -17,7 +17,8 @@ class HMLSTMNetwork(object):
                  out_hidden_size=100,
                  embed_size=100,
                  task='regression',
-                 layer_norm=True):
+                 layer_norm=True,
+                 recursion_depth=2):
         """
         HMLSTMNetwork is a class representing hierarchical multiscale
         long short-term memory network.
@@ -50,6 +51,7 @@ class HMLSTMNetwork(object):
         self._task = task
         self._output_size = output_size
         self._layer_norm = layer_norm
+        self._recursion_depth = recursion_depth
 
         if type(hidden_state_sizes) is list \
                 and len(hidden_state_sizes) != num_layers:
@@ -215,7 +217,8 @@ class HMLSTMNetwork(object):
                 h_above_size = self._hidden_state_sizes[layer + 1]
 
             return HMLSTMCell(self._hidden_state_sizes[layer], batch_size,
-                              h_below_size, h_above_size, reuse, layer_norm=self._layer_norm)
+                              h_below_size, h_above_size, reuse, layer_norm=self._layer_norm,
+                              recursion_depth=self._recursion_depth)
 
         hmlstm = MultiHMLSTMCell(
             [hmlstm_cell(l) for l in range(self._num_layers)], reuse)
