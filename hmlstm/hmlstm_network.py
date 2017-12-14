@@ -1,9 +1,10 @@
-from .hmlstm_cell import HMLSTMCell, HMLSTMState
-from .multi_hmlstm_cell import MultiHMLSTMCell
+import numpy as np
+import tensorflow as tf
 from tensorflow.python.ops import array_ops
 from tensorflow.python.ops import variable_scope as vs
-import tensorflow as tf
-import numpy as np
+
+from .hmlstm_cell import HMLSTMCell, HMLSTMState
+from .multi_hmlstm_cell import MultiHMLSTMCell
 
 
 class HMLSTMNetwork(object):
@@ -19,6 +20,7 @@ class HMLSTMNetwork(object):
                  task='regression',
                  layer_norm=False,
                  recursion_depth=2,
+                 normalization_loss_alpha=0,
                  batch_size=128,
                  variable_path='./vars'):
         """
@@ -54,6 +56,7 @@ class HMLSTMNetwork(object):
         self._output_size = output_size
         self._layer_norm = layer_norm
         self._recursion_depth = recursion_depth
+        self._normalization_loss_alpha = normalization_loss_alpha
         self._batch_size = batch_size
         self._variable_path = variable_path
 
@@ -267,6 +270,118 @@ class HMLSTMNetwork(object):
 
         return h_aboves
 
+    # def loss_normalization(self, states):
+    #     ds = tf.contrib.distributions
+    #     bimix_gauss = ds.Mixture(
+    #         cat=ds.Categorical(probs=[0.4, 0.3, 0.3]),
+    #         components=[
+    #             ds.Normal(loc=0., scale=0.3),
+    #             ds.Normal(loc=-0.3, scale=0.3),
+    #             ds.Normal(loc=+0.3, scale=0.3),
+    #         ])
+    #
+    #     probs = bimix_gauss.prob(states)
+    #
+    #     loss = self._normalization_loss_alpha*tf.reduce_mean(1-probs)
+    #
+    #     return loss
+
+    def compute_hist(self, datas):
+        hist = tf.histogram_fixed_width(values=datas, value_range=[-1., 1.], nbins=20, dtype=tf.float32)
+        hist = hist / tf.reduce_sum(hist)
+        return hist
+
+    @property
+    def get_target_dist_hist(self):
+        ds = tf.contrib.distributions
+        bimix_gauss = ds.Mixture(
+            cat=ds.Categorical(probs=[0.4, 0.3, 0.3]),
+            components=[
+                ds.Normal(loc=0., scale=0.3),
+                ds.Normal(loc=-0.4, scale=0.3),
+                ds.Normal(loc=+0.4, scale=0.3),
+            ])
+
+        samples_dist = ds.Normal(loc=10000.0, scale=0.1).sample(100000)
+
+        return self.compute_hist(samples_dist)
+
+    def map_loss_normalization(self, datas):
+        hist_datas = self.compute_hist(datas)
+        hist_dist = self.get_target_dist_hist
+
+        cross_entropy = -tf.reduce_sum(hist_dist * tf.log(hist_datas + 10e-8))
+
+        return cross_entropy
+
+    def loss_normalization(self, neurons_activations):
+        if self._normalization_loss_alpha == 0:
+            return tf.constant([0.0])
+        losses = tf.map_fn(self.map_loss_normalization, neurons_activations)
+
+        return self._normalization_loss_alpha*tf.reduce_mean(losses)
+
+    def print_trainable_variables(self):
+        variables_names = [v.name for v in tf.trainable_variables()]
+        for v in variables_names:
+            print("Variable: ", v)
+
+    def sort(self, tensor, sample_size):
+        return tf.gather(tensor, tf.nn.top_k(tensor, k=sample_size).indices)
+
+    def true_dist_generator(self, m, n):
+        ds = tf.contrib.distributions
+        bimix_gauss = ds.Mixture(
+            cat=ds.Categorical(probs=[0.5, 0.5]),
+            components=[
+                ds.Normal(loc=-0.5, scale=0.2),
+                ds.Normal(loc=+0.5, scale=0.2),
+            ])
+        # dist = tf.distributions.Normal(0., 1.)
+        samples = tf.stack([self.sort(bimix_gauss.sample(n), n) for _ in range(m)])
+        # samples = tf.stack([bimix_gauss.sample(n) for _ in range(m)])
+        return samples
+
+    def adv_norm_network(self, G_sample):
+        X_dim = self._batch_size
+
+        # nb_samples = self._max_seq_length
+        # for h_size in self._hidden_state_sizes:
+        #     nb_samples = nb_samples*h_size
+
+        # sorted_samples = tf.stack([self.sort(sample, X_dim) for sample in tf.unstack(G_sample, num=nb_samples)])
+
+        weighs_initializer = tf.random_uniform_initializer(0, 0.2)
+        bias_initializer = tf.constant_initializer(0)
+
+        h_dim = 128
+
+        D_W1 = tf.get_variable('D_W1', [X_dim, h_dim], initializer=weighs_initializer)
+        D_b1 = tf.get_variable('D_b1', [h_dim], initializer=bias_initializer)
+
+        D_W2 = tf.get_variable('D_W2', [h_dim, 1], initializer=weighs_initializer)
+        D_b2 = tf.get_variable('D_b2', [1], initializer=bias_initializer)
+
+        theta_D = [D_W1, D_W2, D_b1, D_b2]
+
+        def discriminator(x):
+            D_h1 = tf.nn.relu(tf.matmul(x, D_W1) + D_b1)
+            out = tf.matmul(D_h1, D_W2) + D_b2
+            return out
+
+        D_real = discriminator(self.true_dist_generator(100, X_dim))
+
+        D_fake = discriminator(G_sample)
+
+        D_loss = -(tf.reduce_mean(D_real) - tf.reduce_mean(D_fake))
+        G_loss = -tf.reduce_mean(D_fake)
+
+        D_solver = tf.train.RMSPropOptimizer(learning_rate=5e-5).minimize(-D_loss, var_list=theta_D)
+
+        clip_D = [p.assign(tf.clip_by_value(p, -0.01, 0.01)) for p in theta_D]
+
+        return D_solver, G_loss, D_loss, clip_D
+
     def network(self, reuse):
         batch_size = tf.shape(self.batch_in)[1]
         hmlstm = self.create_multicell(batch_size, reuse)
@@ -318,9 +433,9 @@ class HMLSTMNetwork(object):
             hs = tf.concat(hs, axis=1)  # [B,  sum(h_l)]
             return hs
 
-        hs = tf.map_fn(map_extract_layer_h, states)                # [T, B, sum(h_l)]
-        hs = tf.transpose(hs, [1, 0, 2])
-        hs = tf.split(hs, self._hidden_state_sizes, axis=2)        # List([T, B, h_l])
+        hs = tf.map_fn(map_extract_layer_h, states)  # [T, B, sum(h_l)]
+        hs = tf.transpose(hs, [1, 0, 2])  # [B, T, sum(h_l)]
+        split_hs = tf.split(hs, self._hidden_state_sizes, axis=2)        # List([B, T, h_l])
 
         mapped = tf.map_fn(map_output, to_map)  # [T, B, _]
 
@@ -333,12 +448,29 @@ class HMLSTMNetwork(object):
         loss = tf.multiply(loss, sequence_mask)                   # [B, T]
         loss = tf.reduce_mean(loss)                               # [1]
         regularization = 0 # 0.0000000001*tf.reduce_mean(indicators)
-        loss = loss + regularization
+
+        neurons_activations = tf.transpose(hs, perm=(1, 2, 0))  # [T, sum(h_l), B]
+        neurons_activations = tf.reshape(neurons_activations, [sum(self._hidden_state_sizes), self._max_seq_length*batch_size])
+
+        # norm_loss = self.loss_normalization(neurons_activations)
+        # norm_loss = tf.Print(norm_loss, [norm_loss], 'norm_loss')
+
+        samples = tf.transpose(hs, [1, 2, 0])
+        samples = tf.reshape(samples, [-1, self._batch_size])
+        d_solver, g_loss, d_loss, clip_d = self.adv_norm_network(samples)
+
         predictions = mapped[:, :, -self._output_size:]           # [T, B, output_size]
 
         train = self._optimizer.minimize(loss, global_step=self.global_step)
 
-        return train, loss, indicators, predictions, embeded, hs
+        return train, d_solver, loss, d_loss, indicators, predictions, embeded, split_hs, clip_d
+
+    def init(self):
+        if self._session is None:
+            self._get_graph()
+            self._session = tf.Session()
+            init = tf.group(tf.global_variables_initializer(), tf.local_variables_initializer())
+            self._session.run(init)
 
     def init(self):
         if self._session is None:
@@ -352,7 +484,8 @@ class HMLSTMNetwork(object):
               batches_out,
               batches_seq_lengths,
               epochs=3,
-              verbose=False):
+              verbose=False,
+              train_adversarial=False):
         """
         Train the network.
 
@@ -367,8 +500,7 @@ class HMLSTMNetwork(object):
         epochs: integer, number of epochs
         """
 
-        optim, loss, _, _, _, _ = self._get_graph()
-
+        optim, d_optim, loss, d_loss, _, _, _, _, clip_d = self._get_graph()
         for epoch in range(epochs):
             if verbose: print('Epoch %d' % epoch)
             for batch_in, batch_out, seq_lengths in zip(batches_in, batches_out, batches_seq_lengths):
@@ -378,6 +510,9 @@ class HMLSTMNetwork(object):
                     self.batch_out: np.swapaxes(batch_out, 0, 1),
                     self.lengths: seq_lengths
                 }
+                for _ in range(5):
+                    _, _loss_d, _ = self._session.run([d_optim, d_loss, clip_d], feed_dict)
+
                 _, _loss = self._session.run(ops, feed_dict)
                 if verbose: print('loss:', _loss)
 
@@ -405,8 +540,7 @@ class HMLSTMNetwork(object):
         """
 
         batch = np.array(batch)
-        _, _, _, predictions, embeddings, states = self._get_graph()
-
+        _, _, _, _, _, predictions, embeddings, states, _ = self._get_graph()
         # batch_out is not used for prediction, but needs to be fed in
         batch_out_size = (batch.shape[1], batch.shape[0], self._output_size)
         gradients = tf.gradients(predictions[-1:, :], self.batch_in)
@@ -442,8 +576,7 @@ class HMLSTMNetwork(object):
         """
 
         batch = np.array(batch)
-        _, _, indicators, _, _, _ = self._get_graph()
-
+        _, _, _, _, indicators, _, _, _, _ = self._get_graph()
         # batch_out is not used for prediction, but needs to be fed in
         batch_out_size = (batch.shape[1], batch.shape[0], self._output_size)
         _indicators = self._session.run(indicators, {
