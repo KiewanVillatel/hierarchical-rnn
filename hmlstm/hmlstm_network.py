@@ -17,8 +17,10 @@ class HMLSTMNetwork(object):
                  out_hidden_size=100,
                  embed_size=100,
                  task='regression',
-                 layer_norm=True,
-                 recursion_depth=2):
+                 layer_norm=False,
+                 recursion_depth=2,
+                 batch_size=128,
+                 variable_path='./vars'):
         """
         HMLSTMNetwork is a class representing hierarchical multiscale
         long short-term memory network.
@@ -52,6 +54,8 @@ class HMLSTMNetwork(object):
         self._output_size = output_size
         self._layer_norm = layer_norm
         self._recursion_depth = recursion_depth
+        self._batch_size = batch_size
+        self._variable_path = variable_path
 
         if type(hidden_state_sizes) is list \
                 and len(hidden_state_sizes) != num_layers:
@@ -77,8 +81,8 @@ class HMLSTMNetwork(object):
         self.lengths = tf.placeholder(tf.int32, shape=(None,))
 
         self.global_step = tf.get_variable('global_step', [], initializer=tf.constant_initializer(0), trainable=False)
-        starter_learning_rate = 0.1
-        end_learning_rate = 0.0001
+        starter_learning_rate = 0.01
+        end_learning_rate = 0.00001
         decay_steps = 100000
         learning_rate = tf.train.polynomial_decay(starter_learning_rate, self.global_step,
                                                   decay_steps, end_learning_rate,
@@ -89,6 +93,8 @@ class HMLSTMNetwork(object):
         self._initialize_output_variables()
         self._initialize_gate_variables()
         self._initialize_embedding_variables()
+
+        self.init()
 
     def _initialize_gate_variables(self):
         with vs.variable_scope('gates_vars'):
@@ -114,13 +120,10 @@ class HMLSTMNetwork(object):
                 w_out_size = self._output_size if i == self._num_hidden_layers-1 else self._out_hidden_size
                 vs.get_variable( w_var_name, [w_in_size, w_out_size], dtype=tf.float32)
 
-    def load_variables(self, path='./hmlstm_ckpt'):
-        if self._session is None:
-            self._session = tf.Session()
-
-            saver = tf.train.Saver()
-            print('loading variables...')
-            saver.restore(self._session, path)
+    def load_variables(self):
+        saver = tf.train.Saver()
+        print('loading variables...')
+        saver.restore(self._session, self._variable_path)
 
     def save_variables(self, path='./hmlstm_ckpt'):
         saver = tf.train.Saver()
@@ -332,17 +335,22 @@ class HMLSTMNetwork(object):
         regularization = 0 # 0.0000000001*tf.reduce_mean(indicators)
         loss = loss + regularization
         predictions = mapped[:, :, -self._output_size:]           # [T, B, output_size]
+
         train = self._optimizer.minimize(loss, global_step=self.global_step)
 
         return train, loss, indicators, predictions, embeded, hs
+
+    def init(self):
+        if self._session is None:
+            self._get_graph()
+            self._session = tf.Session()
+            init = tf.group(tf.global_variables_initializer(), tf.local_variables_initializer())
+            self._session.run(init)
 
     def train(self,
               batches_in,
               batches_out,
               batches_seq_lengths,
-              variable_path='./hmlstm_ckpt',
-              load_vars_from_disk=False,
-              save_vars_to_disk=False,
               epochs=3,
               verbose=False):
         """
@@ -356,22 +364,10 @@ class HMLSTMNetwork(object):
         batches_out: a 4 dimensional numpy array. The dimensions should be
             [num_batches, batch_size, num_timesteps, output_size]
             These represent the output at each time step for each batch.
-        variable_path: the path to which variable values will be saved and/or
-            loaded
-        load_vars_from_disk: bool, whether to load variables prior to training
-        load_vars_from_disk: bool, whether to save variables after training
         epochs: integer, number of epochs
         """
 
         optim, loss, _, _, _, _ = self._get_graph()
-
-        if not load_vars_from_disk:
-            if self._session is None:
-                self._session = tf.Session()
-                init = tf.global_variables_initializer()
-                self._session.run(init)
-        else:
-            self.load_variables(variable_path)
 
         for epoch in range(epochs):
             if verbose: print('Epoch %d' % epoch)
@@ -385,22 +381,22 @@ class HMLSTMNetwork(object):
                 _, _loss = self._session.run(ops, feed_dict)
                 if verbose: print('loss:', _loss)
 
-        self.save_variables(variable_path)
-
     def predict(self, batch, variable_path='./hmlstm_ckpt',
                 return_gradients=False):
         """
         Make predictions.
 
+        If there is no active session in the network
+        object (i.e. it has not yet been used to train or predict, or the
+        tensorflow session has been manually closed), variables will be
+        loaded from the provided path. Otherwise variables already present
+        in the session will be used.
+
         params:
         ---
         batch: batch for which to make predictions. should have dimensions
             [batch_size, num_timesteps, output_size]
-        variable_path: string. If there is no active session in the network
-            object (i.e. it has not yet been used to train or predict, or the
-            tensorflow session has been manually closed), variables will be
-            loaded from the provided path. Otherwise variables already present
-            in the session will be used.
+
 
         returns:
         ---
@@ -410,8 +406,6 @@ class HMLSTMNetwork(object):
 
         batch = np.array(batch)
         _, _, _, predictions, embeddings, states = self._get_graph()
-
-        self._load_vars(variable_path)
 
         # batch_out is not used for prediction, but needs to be fed in
         batch_out_size = (batch.shape[1], batch.shape[0], self._output_size)
@@ -427,19 +421,20 @@ class HMLSTMNetwork(object):
 
         return np.swapaxes(_predictions, 0, 1), np.swapaxes(_embeddings, 0, 1), _states
 
-    def predict_boundaries(self, batch, variable_path='./hmlstm_ckpt'):
+    def predict_boundaries(self, batch):
         """
         Find indicator values for every layer at every timestep.
+
+        If there is no active session in the network
+        object (i.e. it has not yet been used to train or predict, or the
+        tensorflow session has been manually closed), variables will be
+        loaded from the provided path. Otherwise variables already present
+        in the session will be used.
 
         params:
         ---
         batch: batch for which to make predictions. should have dimensions
             [batch_size, num_timesteps, output_size]
-        variable_path: string. If there is no active session in the network
-            object (i.e. it has not yet been used to train or predict, or the
-            tensorflow session has been manually closed), variables will be
-            loaded from the provided path. Otherwise variables already present
-            in the session will be used.
 
         returns:
         ---
@@ -448,8 +443,6 @@ class HMLSTMNetwork(object):
 
         batch = np.array(batch)
         _, _, indicators, _, _, _ = self._get_graph()
-
-        self._load_vars(variable_path)
 
         # batch_out is not used for prediction, but needs to be fed in
         batch_out_size = (batch.shape[1], batch.shape[0], self._output_size)
@@ -464,11 +457,3 @@ class HMLSTMNetwork(object):
         if self._graph is None:
             self._graph = self.network(reuse=False)
         return self._graph
-
-    def _load_vars(self, variable_path):
-        if self._session is None:
-            try:
-                self.load_variables(variable_path)
-            except:
-                raise RuntimeError('Session unitialized and no variables saved'
-                                   + ' at provided path %s' % variable_path)
