@@ -83,7 +83,7 @@ class HMLSTMNetwork(object):
         self.global_step = tf.get_variable('global_step', [], initializer=tf.constant_initializer(0), trainable=False)
         starter_learning_rate = 0.01
         end_learning_rate = 0.00001
-        decay_steps = 100000
+        decay_steps = 10000
         learning_rate = tf.train.polynomial_decay(starter_learning_rate, self.global_step,
                                                   decay_steps, end_learning_rate,
                                                   power=0.5)
@@ -369,8 +369,11 @@ class HMLSTMNetwork(object):
 
         optim, loss, _, _, _, _ = self._get_graph()
 
+        losses = []
+
         for epoch in range(epochs):
-            if verbose: print('Epoch %d' % epoch)
+            epoch_losses = []
+            if verbose : print('Epoch %d' % epoch)
             for batch_in, batch_out, seq_lengths in zip(batches_in, batches_out, batches_seq_lengths):
                 ops = [optim, loss]
                 feed_dict = {
@@ -379,7 +382,10 @@ class HMLSTMNetwork(object):
                     self.lengths: seq_lengths
                 }
                 _, _loss = self._session.run(ops, feed_dict)
-                if verbose: print('loss:', _loss)
+                if verbose : print('loss:', _loss)
+                epoch_losses.append(_loss)
+            losses.append(sum(epoch_losses))
+        return losses
 
     def predict(self, batch, variable_path='./hmlstm_ckpt',
                 return_gradients=False):
