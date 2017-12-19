@@ -165,7 +165,7 @@ class HMLSTMCell(rnn_cell_impl.RNNCell):
 
     def calculate_new_indicator(self, z_tilde):
         # use slope annealing trick
-        slope_multiplier = 1  # NOTE: Change this for some tasks
+        slope_multiplier = 5  # NOTE: Change this for some tasks
         sigmoided = tf.sigmoid(z_tilde * slope_multiplier)
 
         # replace gradient calculation - use straight-through estimator

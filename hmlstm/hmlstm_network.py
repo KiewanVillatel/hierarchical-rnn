@@ -81,7 +81,7 @@ class HMLSTMNetwork(object):
         self.lengths = tf.placeholder(tf.int32, shape=(None,))
 
         self.global_step = tf.get_variable('global_step', [], initializer=tf.constant_initializer(0), trainable=False)
-        starter_learning_rate = 0.01
+        starter_learning_rate = 0.1
         end_learning_rate = 0.00001
         decay_steps = 10000
         learning_rate = tf.train.polynomial_decay(starter_learning_rate, self.global_step,
