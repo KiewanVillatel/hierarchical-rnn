@@ -159,7 +159,7 @@ class HMLSTMCell(rnn_cell_impl.RNNCell):
                 tf.equal(zb, tf.constant(0., dtype=tf.float32))
             ),  # [B]
             tf.identity(h),  # [B, h_l], if copy
-            tf.multiply(o, tf.tanh(self._norm(new_c, 'new_c') if self._layer_norm else new_c))  # [B, h_l], otherwise
+            tf.multiply(o, tf.tanh(self._norm(new_c, 'new_c') if self._layer_norm else tf.tanh(new_c)))  # [B, h_l], otherwise
         )
         return new_h  # [B, h_l]
 
