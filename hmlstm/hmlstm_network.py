@@ -20,7 +20,9 @@ class HMLSTMNetwork(object):
                  layer_norm=False,
                  recursion_depth=2,
                  batch_size=128,
-                 variable_path='./vars'):
+                 variable_path='./vars',
+                 residual=False,
+                 last_layer_residual=False):
         """
         HMLSTMNetwork is a class representing hierarchical multiscale
         long short-term memory network.
@@ -42,6 +44,8 @@ class HMLSTMNetwork(object):
         task: string, one of 'regression' and 'classification'.
         """
 
+        self._last_layer_residual = last_layer_residual
+        self._residual = residual
         self._max_seq_length = max_seq_length
         self._out_hidden_size = out_hidden_size
         self._embed_size = embed_size
@@ -81,15 +85,15 @@ class HMLSTMNetwork(object):
         self.lengths = tf.placeholder(tf.int32, shape=(None,))
 
         self.global_step = tf.get_variable('global_step', [], initializer=tf.constant_initializer(0), trainable=False)
-        starter_learning_rate = 0.1
+        starter_learning_rate = 0.01
         end_learning_rate = 0.00001
-        decay_steps = 10000
+        decay_steps = 1000
         learning_rate = tf.train.polynomial_decay(starter_learning_rate, self.global_step,
                                                   decay_steps, end_learning_rate,
                                                   power=0.5)
         self._optimizer = tf.train.AdamOptimizer(learning_rate)
 
-        #self._optimizer = tf.train.AdamOptimizer(1e-3)
+        # self._optimizer = tf.train.AdamOptimizer(1e-3)
         self._initialize_output_variables()
         self._initialize_gate_variables()
         self._initialize_embedding_variables()
@@ -112,13 +116,13 @@ class HMLSTMNetwork(object):
         with vs.variable_scope('output_module_vars'):
             for i in range(0, self._num_hidden_layers):
                 b_var_name = 'b' + str(i + 1)
-                b_size = self._out_hidden_size if i != self._num_hidden_layers-1 else self._output_size
+                b_size = self._out_hidden_size if i != self._num_hidden_layers - 1 else self._output_size
                 vs.get_variable(b_var_name, [1, b_size], dtype=tf.float32)
 
                 w_var_name = 'w' + str(i + 1)
                 w_in_size = self._embed_size if i == 0 else self._out_hidden_size
-                w_out_size = self._output_size if i == self._num_hidden_layers-1 else self._out_hidden_size
-                vs.get_variable( w_var_name, [w_in_size, w_out_size], dtype=tf.float32)
+                w_out_size = self._output_size if i == self._num_hidden_layers - 1 else self._out_hidden_size
+                vs.get_variable(w_var_name, [w_in_size, w_out_size], dtype=tf.float32)
 
     def load_variables(self):
         saver = tf.train.Saver()
@@ -181,15 +185,15 @@ class HMLSTMNetwork(object):
             # feed forward network
             _layers = []
             for i in range(0, self._num_hidden_layers):
-                inputs = embedding if i == 0 else _layers[i-1]
-                w = vs.get_variable('w' + str(i+1))
+                inputs = embedding if i == 0 else _layers[i - 1]
+                w = vs.get_variable('w' + str(i + 1))
                 b = vs.get_variable('b' + str(i + 1))
                 _l = tf.matmul(inputs, w) + b
                 if i != self._num_hidden_layers - 1:
                     _l = tf.nn.tanh(_l)
                 _layers.append(_l)
 
-            prediction = tf.identity(_layers[self._num_hidden_layers-1], name='prediction')
+            prediction = tf.identity(_layers[self._num_hidden_layers - 1], name='prediction')
 
             # first layer
 
@@ -207,6 +211,7 @@ class HMLSTMNetwork(object):
 
     def create_multicell(self, batch_size, reuse):
         def hmlstm_cell(layer):
+            residual = self._residual
             if layer == 0:
                 h_below_size = self._input_size
             else:
@@ -216,12 +221,13 @@ class HMLSTMNetwork(object):
                 # doesn't matter, all zeros, but for convenience with summing
                 # so the sum of ha sizes is just sum of hidden states
                 h_above_size = self._hidden_state_sizes[0]
+                residual = self._last_layer_residual
             else:
                 h_above_size = self._hidden_state_sizes[layer + 1]
 
             return HMLSTMCell(self._hidden_state_sizes[layer], batch_size,
                               h_below_size, h_above_size, reuse, layer_norm=self._layer_norm,
-                              recursion_depth=self._recursion_depth)
+                              recursion_depth=self._recursion_depth, residual=residual)
 
         hmlstm = MultiHMLSTMCell(
             [hmlstm_cell(l) for l in range(self._num_layers)], reuse)
@@ -318,23 +324,24 @@ class HMLSTMNetwork(object):
             hs = tf.concat(hs, axis=1)  # [B,  sum(h_l)]
             return hs
 
-        hs = tf.map_fn(map_extract_layer_h, states)                # [T, B, sum(h_l)]
+        hs = tf.map_fn(map_extract_layer_h, states)  # [T, B, sum(h_l)]
         hs = tf.transpose(hs, [1, 0, 2])
-        hs = tf.split(hs, self._hidden_state_sizes, axis=2)        # List([T, B, h_l])
+        hs = tf.split(hs, self._hidden_state_sizes, axis=2)  # List([T, B, h_l])
 
         mapped = tf.map_fn(map_output, to_map)  # [T, B, _]
 
         # mapped has diffenent shape for task 'regression' and 'classification'
         embeded = mapped[:, :, :self._embed_size]
         loss = mapped[:, :, self._embed_size:-self._output_size]  # [T, B, 1]
-        loss = tf.transpose(loss, [1, 0, 2])                      # [B, T, 1]
-        loss = tf.reshape(loss, [-1, self._max_seq_length])       # [B, T]
-        sequence_mask = tf.sequence_mask(tf.to_int32(self.lengths), maxlen=self._max_seq_length, dtype=tf.float32) # [B, T]
-        loss = tf.multiply(loss, sequence_mask)                   # [B, T]
-        loss = tf.reduce_mean(loss)                               # [1]
-        regularization = 0 # 0.0000000001*tf.reduce_mean(indicators)
+        loss = tf.transpose(loss, [1, 0, 2])  # [B, T, 1]
+        loss = tf.reshape(loss, [-1, self._max_seq_length])  # [B, T]
+        sequence_mask = tf.sequence_mask(tf.to_int32(self.lengths), maxlen=self._max_seq_length,
+                                         dtype=tf.float32)  # [B, T]
+        loss = tf.multiply(loss, sequence_mask)  # [B, T]
+        loss = tf.reduce_mean(loss)  # [1]
+        regularization = 0  # 0.0000000001*tf.reduce_mean(indicators)
         loss = loss + regularization
-        predictions = mapped[:, :, -self._output_size:]           # [T, B, output_size]
+        predictions = mapped[:, :, -self._output_size:]  #  [T, B, output_size]
 
         train = self._optimizer.minimize(loss, global_step=self.global_step)
 
@@ -373,7 +380,7 @@ class HMLSTMNetwork(object):
 
         for epoch in range(epochs):
             epoch_losses = []
-            if verbose : print('Epoch %d' % epoch)
+            if verbose: print('Epoch %d' % epoch)
             for batch_in, batch_out, seq_lengths in zip(batches_in, batches_out, batches_seq_lengths):
                 ops = [optim, loss]
                 feed_dict = {
@@ -382,13 +389,12 @@ class HMLSTMNetwork(object):
                     self.lengths: seq_lengths
                 }
                 _, _loss = self._session.run(ops, feed_dict)
-                if verbose : print('loss:', _loss)
+                if verbose: print('loss:', _loss)
                 epoch_losses.append(_loss)
             losses.append(sum(epoch_losses))
         return losses
 
-    def predict(self, batch, variable_path='./hmlstm_ckpt',
-                return_gradients=False):
+    def predict(self, batch, return_gradients=False):
         """
         Make predictions.
 
@@ -416,10 +422,11 @@ class HMLSTMNetwork(object):
         # batch_out is not used for prediction, but needs to be fed in
         batch_out_size = (batch.shape[1], batch.shape[0], self._output_size)
         gradients = tf.gradients(predictions[-1:, :], self.batch_in)
-        _predictions, _gradients, _embeddings, _states = self._session.run([predictions, gradients, embeddings, states], {
-            self.batch_in: np.swapaxes(batch, 0, 1),
-            self.batch_out: np.zeros(batch_out_size),
-        })
+        _predictions, _gradients, _embeddings, _states = self._session.run([predictions, gradients, embeddings, states],
+                                                                           {
+                                                                               self.batch_in: np.swapaxes(batch, 0, 1),
+                                                                               self.batch_out: np.zeros(batch_out_size),
+                                                                           })
 
         if return_gradients:
             return tuple(np.swapaxes(r, 0, 1) for

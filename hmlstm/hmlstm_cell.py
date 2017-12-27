@@ -12,8 +12,9 @@ HMLSTMState = collections.namedtuple('HMLSTMCellState', ['c', 'h', 'z'])
 
 class HMLSTMCell(rnn_cell_impl.RNNCell):
     def __init__(self, num_units, batch_size, h_below_size, h_above_size,
-                 reuse, layer_norm=True, layer_norm_gain=1.0, layer_norm_shift=0.0, recursion_depth=2):
+                 reuse, layer_norm=True, layer_norm_gain=1.0, layer_norm_shift=0.0, recursion_depth=2, residual=False):
         super(HMLSTMCell, self).__init__(_reuse=reuse)
+        self._residual = residual
         self._num_units = num_units
         self._h_below_size = h_below_size
         self._h_above_size = h_above_size
@@ -139,7 +140,7 @@ class HMLSTMCell(rnn_cell_impl.RNNCell):
             tf.where(
                 tf.equal(zb, tf.constant(0., dtype=tf.float32)),  # [B]
                 tf.identity(c),  # [B, h_l], copy
-                tf.add(tf.multiply(f, c), tf.multiply(i, g))  # [B, h_l], update
+                tf.add(c, tf.multiply(i, g)) if self._residual else tf.add(tf.multiply(f, c), tf.multiply(i, g)) # [B, h_l], update
             )
         )
         return new_c  # [B, h_l]
