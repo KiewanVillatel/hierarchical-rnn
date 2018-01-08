@@ -22,7 +22,11 @@ class HMLSTMNetwork(object):
                  batch_size=128,
                  variable_path='./vars',
                  residual=False,
-                 last_layer_residual=False):
+                 last_layer_residual=False,
+                 lr_start=0.01,
+                 lr_end=0.00001,
+                 lr_steps=1000
+                 ):
         """
         HMLSTMNetwork is a class representing hierarchical multiscale
         long short-term memory network.
@@ -85,12 +89,9 @@ class HMLSTMNetwork(object):
         self.lengths = tf.placeholder(tf.int32, shape=(None,))
 
         self.global_step = tf.get_variable('global_step', [], initializer=tf.constant_initializer(0), trainable=False)
-        starter_learning_rate = 0.01
-        end_learning_rate = 0.00001
-        decay_steps = 1000
-        learning_rate = tf.train.polynomial_decay(starter_learning_rate, self.global_step,
-                                                  decay_steps, end_learning_rate,
-                                                  power=0.5)
+
+        learning_rate = tf.train.polynomial_decay(lr_start, self.global_step, lr_steps, lr_end, power=0.5)
+
         self._optimizer = tf.train.AdamOptimizer(learning_rate)
 
         # self._optimizer = tf.train.AdamOptimizer(1e-3)
