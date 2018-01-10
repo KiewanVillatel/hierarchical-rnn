@@ -390,6 +390,8 @@ class HMLSTMNetwork(object):
                     self.lengths: seq_lengths
                 }
                 _, _loss = self._session.run(ops, feed_dict)
+                if _loss < 0:
+                    raise Exception('Negative loss')
                 if verbose: print('loss:', _loss)
                 epoch_losses.append(_loss)
             losses.append(sum(epoch_losses))

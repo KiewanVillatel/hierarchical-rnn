@@ -65,40 +65,58 @@ class HMLSTMCell(rnn_cell_impl.RNNCell):
             s_above = tf.multiply(expanded_z, ha)  # [B, ha_l]
             s_below = tf.multiply(zb, hb)  # [B, hb_l]
 
-            length = 4 * self._num_units + 1
+            bias_init = tf.constant_initializer(0, dtype=tf.float32)
             states = [s_recurrent, s_above, s_below]
 
-            bias_init = tf.constant_initializer(0, dtype=tf.float32)
-            # [B, 4 * h_l + 1]
+            if self._residual:
+                with vs.variable_scope("residual"):
+                    new_h_tilde = s_recurrent
+                    for i in range(1):
+                        with vs.variable_scope("linear"+str(i)):
+                            length = self._num_units + 1
+                            concat = rnn_cell_impl._linear([new_h_tilde, s_above, s_below], length, bias=True,
+                                                           bias_initializer=bias_init)
+                            splits = tf.constant(([self._num_units]) + [1], dtype=tf.int32)
+                            new_h_tilde, z_tilde = array_ops.split(value=concat, num_or_size_splits=splits, axis=1)
+                            new_h_tilde = tf.nn.relu(new_h_tilde)
+                            z_tilde = z_tilde
 
-            concat = rnn_cell_impl._linear(states, length, bias=True,
-                                           bias_initializer=bias_init)
+                    new_h = tf.tanh(h + new_h_tilde)
+                    new_c = new_h
+            else:
+                length = 4 * self._num_units + 1
 
-            gate_splits = tf.constant(
-                ([self._num_units] * 4) + [1], dtype=tf.int32)
+                # [B, 4 * h_l + 1]
 
-            i, g, f, o, z_tilde = array_ops.split(
-                value=concat, num_or_size_splits=gate_splits, axis=1)
+                concat = rnn_cell_impl._linear(states, length, bias=True,
+                                               bias_initializer=bias_init)
 
-            if self._layer_norm:
-                i = self._norm(i, 'i')  # [B, h_l]
-                g = self._norm(g, 'g')  # [B, h_l]
-                f = self._norm(f, 'f')  # [B, h_l]
-                o = self._norm(o, 'o')  # [B, h_l]
+                gate_splits = tf.constant(
+                    ([self._num_units] * 4) + [1], dtype=tf.int32)
 
-            i = tf.sigmoid(i)  # [B, h_l]
-            g = tf.tanh(g)  # [B, h_l]
-            f = tf.sigmoid(f)  # [B, h_l]
-            o = tf.sigmoid(o)  # [B, h_l]
+                i, g, f, o, z_tilde = array_ops.split(
+                    value=concat, num_or_size_splits=gate_splits, axis=1)
 
-            new_c = self.calculate_new_cell_state(c, g, i, f, z, zb)
-            new_h = self.calculate_new_hidden_state(h, o, new_c, z, zb)
+                if self._layer_norm:
+                    i = self._norm(i, 'i')  # [B, h_l]
+                    g = self._norm(g, 'g')  # [B, h_l]
+                    f = self._norm(f, 'f')  # [B, h_l]
+                    o = self._norm(o, 'o')  # [B, h_l]
+
+                i = tf.sigmoid(i)  # [B, h_l]
+                g = tf.tanh(g)  # [B, h_l]
+                f = tf.sigmoid(f)  # [B, h_l]
+                o = tf.sigmoid(o)  # [B, h_l]
+
+                new_c = self.calculate_new_cell_state(c, g, i, f, z, zb)
+                new_h = self.calculate_new_hidden_state(h, o, new_c, z, zb)
+
             new_z = tf.expand_dims(self.calculate_new_indicator(z_tilde), -1)
 
             output = array_ops.concat((new_h, new_z), axis=1)  # [B, h_l + 1]
             new_state = HMLSTMState(c=new_c, h=new_h, z=new_z)
 
-            return self.recurrent_call(inputs, new_state, output, nb_call - 1)
+        return self.recurrent_call(inputs, new_state, output, nb_call - 1)
 
     def call(self, inputs, state):
         """
@@ -140,7 +158,7 @@ class HMLSTMCell(rnn_cell_impl.RNNCell):
             tf.where(
                 tf.equal(zb, tf.constant(0., dtype=tf.float32)),  # [B]
                 tf.identity(c),  # [B, h_l], copy
-                tf.add(c, tf.multiply(i, g)) if self._residual else tf.add(tf.multiply(f, c), tf.multiply(i, g)) # [B, h_l], update
+                tf.add(tf.multiply(f, c), tf.multiply(i, g)) # [B, h_l], update
             )
         )
         return new_c  # [B, h_l]
