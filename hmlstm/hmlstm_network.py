@@ -25,7 +25,8 @@ class HMLSTMNetwork(object):
                  last_layer_residual=False,
                  lr_start=0.01,
                  lr_end=0.00001,
-                 lr_steps=1000
+                 lr_steps=1000,
+                 grad_clip=1.0
                  ):
         """
         HMLSTMNetwork is a class representing hierarchical multiscale
@@ -64,6 +65,7 @@ class HMLSTMNetwork(object):
         self._recursion_depth = recursion_depth
         self._batch_size = batch_size
         self._variable_path = variable_path
+        self._grad_clip=grad_clip
 
         if type(hidden_state_sizes) is list \
                 and len(hidden_state_sizes) != num_layers:
@@ -345,7 +347,7 @@ class HMLSTMNetwork(object):
         predictions = mapped[:, :, -self._output_size:]  #  [T, B, output_size]
 
         gvs = self._optimizer.compute_gradients(loss)
-        capped_gvs = [(tf.clip_by_value(grad, -1., 1.), var) for grad, var in gvs]
+        capped_gvs = [(tf.clip_by_value(grad, -self._grad_clip, self._grad_clip), var) for grad, var in gvs]
         train = self._optimizer.apply_gradients(capped_gvs, global_step=self.global_step)
 
         return train, loss, indicators, predictions, embeded, hs
