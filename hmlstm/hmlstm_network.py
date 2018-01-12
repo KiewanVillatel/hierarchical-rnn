@@ -344,7 +344,9 @@ class HMLSTMNetwork(object):
         loss = loss + regularization
         predictions = mapped[:, :, -self._output_size:]  #  [T, B, output_size]
 
-        train = self._optimizer.minimize(loss, global_step=self.global_step)
+        gvs = self._optimizer.compute_gradients(loss)
+        capped_gvs = [(tf.clip_by_value(grad, -1., 1.), var) for grad, var in gvs]
+        train = self._optimizer.apply_gradients(capped_gvs, global_step=self.global_step)
 
         return train, loss, indicators, predictions, embeded, hs
 
