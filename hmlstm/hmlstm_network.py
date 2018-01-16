@@ -345,6 +345,7 @@ class HMLSTMNetwork(object):
         regularization = 0  # 0.0000000001*tf.reduce_mean(indicators)
         loss = loss + regularization
         predictions = mapped[:, :, -self._output_size:]  #  [T, B, output_size]
+        predictions = tf.nn.softmax(predictions)
 
         gvs = self._optimizer.compute_gradients(loss)
         capped_gvs = [(tf.clip_by_value(grad, -self._grad_clip, self._grad_clip), var) for grad, var in gvs]
