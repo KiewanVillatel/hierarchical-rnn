@@ -66,6 +66,7 @@ class HMLSTMNetwork(object):
         self._batch_size = batch_size
         self._variable_path = variable_path
         self._grad_clip=grad_clip
+        self._last_states = None
 
         if type(hidden_state_sizes) is list \
                 and len(hidden_state_sizes) != num_layers:
@@ -89,6 +90,9 @@ class HMLSTMNetwork(object):
         self.batch_out = tf.placeholder(
             tf.float32, shape=batch_out_shape, name='batch_out')
         self.lengths = tf.placeholder(tf.int32, shape=(None,))
+        self._initial_states = tf.placeholder(tf.float32,
+                                              (batch_size, (sum(self._hidden_state_sizes) * 2) + self._num_layers),
+                                              name='initial_states')
 
         self.global_step = tf.get_variable('global_step', [], initializer=tf.constant_initializer(0), trainable=False)
 
@@ -297,9 +301,8 @@ class HMLSTMNetwork(object):
 
         # denote 'elem_len' as 'H'
         elem_len = (sum(self._hidden_state_sizes) * 2) + self._num_layers
-        initial = tf.zeros([batch_size, elem_len])  # [B, H]
 
-        states = tf.scan(scan_rnn, self.batch_in, initial)  # [T, B, H]
+        states = tf.scan(scan_rnn, self.batch_in, self._initial_states)  # [T, B, H]
 
         def map_indicators(elem):
             state = self.split_out_cell_states(elem)
@@ -351,7 +354,7 @@ class HMLSTMNetwork(object):
         capped_gvs = [(tf.clip_by_value(grad, -self._grad_clip, self._grad_clip), var) for grad, var in gvs]
         train = self._optimizer.apply_gradients(capped_gvs, global_step=self.global_step)
 
-        return train, loss, indicators, predictions, embeded, hs
+        return train, loss, indicators, predictions, embeded, hs, states
 
     def init(self):
         if self._session is None:
@@ -360,12 +363,22 @@ class HMLSTMNetwork(object):
             init = tf.group(tf.global_variables_initializer(), tf.local_variables_initializer())
             self._session.run(init)
 
+    def get_initial_states(self, TBPTT=False):
+        if not TBPTT or self._last_states is None:
+            return np.zeros((self._batch_size, (sum(self._hidden_state_sizes) * 2) + self._num_layers))
+        else:
+            return self._last_states
+
+    def reset_states(self):
+        self._last_states = None
+
     def train(self,
               batches_in,
               batches_out,
               batches_seq_lengths,
               epochs=3,
-              verbose=False):
+              verbose=False,
+              TBPTT=False):
         """
         Train the network.
 
@@ -380,7 +393,7 @@ class HMLSTMNetwork(object):
         epochs: integer, number of epochs
         """
 
-        optim, loss, _, _, _, _ = self._get_graph()
+        optim, loss, _, _, _, _, states = self._get_graph()
 
         losses = []
 
@@ -388,13 +401,15 @@ class HMLSTMNetwork(object):
             epoch_losses = []
             if verbose: print('Epoch %d' % epoch)
             for batch_in, batch_out, seq_lengths in zip(batches_in, batches_out, batches_seq_lengths):
-                ops = [optim, loss]
+                ops = [optim, loss, states]
                 feed_dict = {
                     self.batch_in: np.swapaxes(batch_in, 0, 1),
                     self.batch_out: np.swapaxes(batch_out, 0, 1),
-                    self.lengths: seq_lengths
+                    self.lengths: seq_lengths,
+                    self._initial_states: self.get_initial_states(TBPTT)
                 }
-                _, _loss = self._session.run(ops, feed_dict)
+                _, _loss, _states = self._session.run(ops, feed_dict)
+                self._last_states = _states[-1, :, :]
                 if _loss < 0:
                     raise Exception('Negative loss')
                 if verbose: print('loss:', _loss)
@@ -402,7 +417,7 @@ class HMLSTMNetwork(object):
             losses.append(sum(epoch_losses))
         return losses
 
-    def predict(self, batch, return_gradients=False):
+    def predict(self, batch, return_gradients=False, TBPTT=False):
         """
         Make predictions.
 
@@ -425,24 +440,26 @@ class HMLSTMNetwork(object):
         """
 
         batch = np.array(batch)
-        _, _, _, predictions, embeddings, states = self._get_graph()
+        _, _, _, predictions, embeddings, hs, states = self._get_graph()
 
         # batch_out is not used for prediction, but needs to be fed in
         batch_out_size = (batch.shape[1], batch.shape[0], self._output_size)
         gradients = tf.gradients(predictions[-1:, :], self.batch_in)
-        _predictions, _gradients, _embeddings, _states = self._session.run([predictions, gradients, embeddings, states],
+        _predictions, _gradients, _embeddings, _hs, _states = self._session.run([predictions, gradients, embeddings, hs, states],
                                                                            {
                                                                                self.batch_in: np.swapaxes(batch, 0, 1),
                                                                                self.batch_out: np.zeros(batch_out_size),
+                                                                               self._initial_states: self.get_initial_states(TBPTT)
                                                                            })
+        self._last_states = _states[-1, :, :]
 
         if return_gradients:
             return tuple(np.swapaxes(r, 0, 1) for
                          r in (_predictions, _gradients[0]))
 
-        return np.swapaxes(_predictions, 0, 1), np.swapaxes(_embeddings, 0, 1), _states
+        return np.swapaxes(_predictions, 0, 1), np.swapaxes(_embeddings, 0, 1), _hs
 
-    def predict_boundaries(self, batch):
+    def predict_boundaries(self, batch, TBPTT=False):
         """
         Find indicator values for every layer at every timestep.
 
@@ -463,13 +480,14 @@ class HMLSTMNetwork(object):
         """
 
         batch = np.array(batch)
-        _, _, indicators, _, _, _ = self._get_graph()
+        _, _, indicators, _, _, _, _ = self._get_graph()
 
         # batch_out is not used for prediction, but needs to be fed in
         batch_out_size = (batch.shape[1], batch.shape[0], self._output_size)
         _indicators = self._session.run(indicators, {
             self.batch_in: np.swapaxes(batch, 0, 1),
-            self.batch_out: np.zeros(batch_out_size)
+            self.batch_out: np.zeros(batch_out_size),
+            self._initial_states: self.get_initial_states(TBPTT)
         })
 
         return np.array(_indicators)
