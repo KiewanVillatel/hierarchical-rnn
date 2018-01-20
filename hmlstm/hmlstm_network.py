@@ -26,7 +26,8 @@ class HMLSTMNetwork(object):
                  lr_start=0.01,
                  lr_end=0.00001,
                  lr_steps=1000,
-                 grad_clip=1.0
+                 grad_clip=1.0,
+                 iterator=None
                  ):
         """
         HMLSTMNetwork is a class representing hierarchical multiscale
@@ -83,16 +84,22 @@ class HMLSTMNetwork(object):
         elif task == 'regression':
             self._loss_function = lambda logits, labels: tf.square((logits - labels))
 
-        batch_in_shape = (None, None, self._input_size)
-        batch_out_shape = (None, None, self._output_size)
-        self.batch_in = tf.placeholder(
-            tf.float32, shape=batch_in_shape, name='batch_in')
-        self.batch_out = tf.placeholder(
-            tf.float32, shape=batch_out_shape, name='batch_out')
-        self.lengths = tf.placeholder(tf.int32, shape=(None,))
-        self._initial_states = tf.placeholder(tf.float32,
-                                              (batch_size, (sum(self._hidden_state_sizes) * 2) + self._num_layers),
-                                              name='initial_states')
+        if iterator is None:
+            batch_in_shape = (None, None, self._input_size)
+            batch_out_shape = (None, None, self._output_size)
+            self.batch_in = tf.placeholder(
+                tf.float32, shape=batch_in_shape, name='batch_in')
+            self.batch_out = tf.placeholder(
+                tf.float32, shape=batch_out_shape, name='batch_out')
+            self.lengths = tf.placeholder(tf.int32, shape=(None,))
+            self._initial_states = tf.placeholder(tf.float32,
+                                                  (batch_size, (sum(self._hidden_state_sizes) * 2) + self._num_layers),
+                                                  name='initial_states')
+        else:
+            self.batch_in, self.batch_out, self.lengths, self._initial_states = iterator.get_next()
+            self.batch_in = tf.transpose(self.batch_in, (1, 0, 2))
+            self.batch_out = tf.transpose(self.batch_out, (1, 0, 2))
+            self._iterator = iterator
 
         self.global_step = tf.get_variable('global_step', [], initializer=tf.constant_initializer(0), trainable=False)
 
@@ -354,13 +361,15 @@ class HMLSTMNetwork(object):
         capped_gvs = [(tf.clip_by_value(grad, -self._grad_clip, self._grad_clip), var) for grad, var in gvs]
         train = self._optimizer.apply_gradients(capped_gvs, global_step=self.global_step)
 
-        return train, loss, indicators, predictions, embeded, hs, states
+        accuracy = tf.metrics.accuracy(tf.argmax(self.batch_out, axis=2), tf.argmax(predictions, axis=2))
+
+        return train, loss, indicators, predictions, embeded, hs, states, accuracy
 
     def init(self):
         if self._session is None:
             self._get_graph()
-            self._session = tf.Session()
             init = tf.group(tf.global_variables_initializer(), tf.local_variables_initializer())
+            self._session = tf.train.MonitoredTrainingSession()
             self._session.run(init)
 
     def get_initial_states(self, TBPTT=False):
@@ -371,6 +380,23 @@ class HMLSTMNetwork(object):
 
     def reset_states(self):
         self._last_states = None
+
+    def train_iterator(self, initializer, epochs=3, verbose=True):
+        optim, loss, _, _, _, _, states, _ = self._get_graph()
+
+        for epoch in range(epochs):
+            self._session.run(initializer)
+            if verbose: print('Epoch %d' % epoch)
+            ops = [optim, loss, states]
+            while True:
+                try:
+                    _, _loss, _states = self._session.run(ops)
+                    self._last_states = _states[-1, :, :]
+                except tf.errors.OutOfRangeError:
+                    break
+            if _loss < 0:
+                raise Exception('Negative loss')
+            if verbose: print('loss:', _loss)
 
     def train(self,
               batches_in,
@@ -393,7 +419,7 @@ class HMLSTMNetwork(object):
         epochs: integer, number of epochs
         """
 
-        optim, loss, _, _, _, _, states = self._get_graph()
+        optim, loss, _, _, _, _, states, _ = self._get_graph()
 
         losses = []
 
@@ -416,6 +442,23 @@ class HMLSTMNetwork(object):
                 epoch_losses.append(_loss)
             losses.append(sum(epoch_losses))
         return losses
+
+    def predict_iterator(self, initializer):
+        self._session.run(initializer)
+
+        _, _, _, predictions, embeddings, hs, states, accuracy = self._get_graph()
+
+        accuracies = []
+
+        while True:
+            try:
+                inputs, _predictions, _embeddings, _hs, _states, _accuracy = self._session.run([self.batch_in, predictions, embeddings, hs, states, accuracy])
+                accuracies.append(_accuracy)
+                self._last_states = _states[-1, :, :]
+            except tf.errors.OutOfRangeError:
+                break
+        return np.mean(accuracies)
+
 
     def predict(self, batch, return_gradients=False, TBPTT=False):
         """
@@ -440,7 +483,7 @@ class HMLSTMNetwork(object):
         """
 
         batch = np.array(batch)
-        _, _, _, predictions, embeddings, hs, states = self._get_graph()
+        _, _, _, predictions, embeddings, hs, states, _ = self._get_graph()
 
         # batch_out is not used for prediction, but needs to be fed in
         batch_out_size = (batch.shape[1], batch.shape[0], self._output_size)
@@ -480,7 +523,7 @@ class HMLSTMNetwork(object):
         """
 
         batch = np.array(batch)
-        _, _, indicators, _, _, _, _ = self._get_graph()
+        _, _, indicators, _, _, _, _, _ = self._get_graph()
 
         # batch_out is not used for prediction, but needs to be fed in
         batch_out_size = (batch.shape[1], batch.shape[0], self._output_size)
