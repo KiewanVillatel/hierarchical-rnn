@@ -381,7 +381,9 @@ class HMLSTMNetwork(object):
     def reset_states(self):
         self._last_states = None
 
-    def train_iterator(self, initializer, epochs=3, verbose=True):
+    def train_iterator(self, initializer, epochs=1, verbose=False):
+        losses = []
+
         optim, loss, _, _, _, _, states, _ = self._get_graph()
 
         for epoch in range(epochs):
@@ -391,12 +393,14 @@ class HMLSTMNetwork(object):
             while True:
                 try:
                     _, _loss, _states = self._session.run(ops)
+                    losses.append(_loss)
                     self._last_states = _states[-1, :, :]
                 except tf.errors.OutOfRangeError:
                     break
             if _loss < 0:
                 raise Exception('Negative loss')
             if verbose: print('loss:', _loss)
+        return losses
 
     def train(self,
               batches_in,
@@ -539,3 +543,14 @@ class HMLSTMNetwork(object):
         if self._graph is None:
             self._graph = self.network(reuse=False)
         return self._graph
+
+    def print_nb_parameters(self):
+        total_parameters = 0
+        for variable in tf.trainable_variables():
+            # shape is an array of tf.Dimension
+            shape = variable.get_shape()
+            variable_parameters = 1
+            for dim in shape:
+                variable_parameters *= dim.value
+            total_parameters += variable_parameters
+        print("Number of parameters", total_parameters)
