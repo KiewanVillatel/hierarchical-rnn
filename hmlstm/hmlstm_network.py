@@ -361,9 +361,20 @@ class HMLSTMNetwork(object):
         capped_gvs = [(tf.clip_by_value(grad, -self._grad_clip, self._grad_clip), var) for grad, var in gvs]
         train = self._optimizer.apply_gradients(capped_gvs, global_step=self.global_step)
 
+        # compute accuracy
         accuracy = tf.metrics.accuracy(tf.argmax(self.batch_out, axis=2), tf.argmax(predictions, axis=2))
 
-        return train, loss, indicators, predictions, embeded, hs, states, accuracy
+        # compute bpc
+        def log2(x):
+            numerator = tf.log(x)
+            denominator = tf.log(tf.constant(2, dtype=numerator.dtype))
+            return numerator / denominator
+        log_predictions = log2(predictions)
+        bpc = tf.multiply(self.batch_out, log_predictions)
+        bpc = tf.reduce_sum(bpc, axis=2)
+        bpc = -tf.reduce_mean(bpc)
+
+        return train, loss, indicators, predictions, embeded, hs, states, accuracy, bpc
 
     def init(self):
         if self._session is None:
@@ -383,24 +394,28 @@ class HMLSTMNetwork(object):
 
     def train_iterator(self, initializer, epochs=1, verbose=False):
         losses = []
+        accuracies = []
+        bpcs = []
 
-        optim, loss, _, _, _, _, states, _ = self._get_graph()
+        optim, loss, _, _, _, _, states, accuracy, bpc = self._get_graph()
 
         for epoch in range(epochs):
             self._session.run(initializer)
             if verbose: print('Epoch %d' % epoch)
-            ops = [optim, loss, states]
+            ops = [optim, loss, states, accuracy, bpc]
             while True:
                 try:
-                    _, _loss, _states = self._session.run(ops)
+                    _, _loss, _states, _accuracy, _bpc = self._session.run(ops)
                     losses.append(_loss)
+                    accuracies.append(_accuracy)
+                    bpcs.append(_bpc)
                     self._last_states = _states[-1, :, :]
                 except tf.errors.OutOfRangeError:
                     break
             if _loss < 0:
                 raise Exception('Negative loss')
             if verbose: print('loss:', _loss)
-        return losses
+        return np.mean(losses), np.mean(accuracies), np.mean(bpcs)
 
     def train(self,
               batches_in,
@@ -423,7 +438,7 @@ class HMLSTMNetwork(object):
         epochs: integer, number of epochs
         """
 
-        optim, loss, _, _, _, _, states, _ = self._get_graph()
+        optim, loss, _, _, _, _, states, _, _ = self._get_graph()
 
         losses = []
 
@@ -450,18 +465,20 @@ class HMLSTMNetwork(object):
     def predict_iterator(self, initializer):
         self._session.run(initializer)
 
-        _, _, _, predictions, embeddings, hs, states, accuracy = self._get_graph()
+        _, _, _, predictions, embeddings, hs, states, accuracy, bpc = self._get_graph()
 
         accuracies = []
+        bpcs = []
 
         while True:
             try:
-                inputs, _predictions, _embeddings, _hs, _states, _accuracy = self._session.run([self.batch_in, predictions, embeddings, hs, states, accuracy])
+                inputs, _predictions, _embeddings, _hs, _states, _accuracy, _bpc = self._session.run([self.batch_in, predictions, embeddings, hs, states, accuracy, bpc])
                 accuracies.append(_accuracy)
-                self._last_states = _states[-1, :, :]
+                bpcs.append(_bpc)
+                # self._last_states = _states[-1, :, :]
             except tf.errors.OutOfRangeError:
                 break
-        return np.mean(accuracies)
+        return np.mean(accuracies), np.mean(bpcs)
 
 
     def predict(self, batch, return_gradients=False, TBPTT=False):
@@ -487,7 +504,7 @@ class HMLSTMNetwork(object):
         """
 
         batch = np.array(batch)
-        _, _, _, predictions, embeddings, hs, states, _ = self._get_graph()
+        _, _, _, predictions, embeddings, hs, states, _, _ = self._get_graph()
 
         # batch_out is not used for prediction, but needs to be fed in
         batch_out_size = (batch.shape[1], batch.shape[0], self._output_size)
@@ -527,7 +544,7 @@ class HMLSTMNetwork(object):
         """
 
         batch = np.array(batch)
-        _, _, indicators, _, _, _, _, _ = self._get_graph()
+        _, _, indicators, _, _, _, _, _, _ = self._get_graph()
 
         # batch_out is not used for prediction, but needs to be fed in
         batch_out_size = (batch.shape[1], batch.shape[0], self._output_size)
