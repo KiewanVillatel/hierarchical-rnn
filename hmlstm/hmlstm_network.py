@@ -362,7 +362,14 @@ class HMLSTMNetwork(object):
         train = self._optimizer.apply_gradients(capped_gvs, global_step=self.global_step)
 
         # compute accuracy
-        accuracy = tf.metrics.accuracy(tf.argmax(self.batch_out, axis=2), tf.argmax(predictions, axis=2))
+        # accuracy = tf.metrics.accuracy(tf.argmax(self.batch_out, axis=2),
+        #                                tf.argmax(predictions, axis=2),
+        #                                weights=tf.transpose(sequence_mask, (1, 0)))
+        correct_preds = tf.cast(tf.equal(tf.argmax(self.batch_out, axis=2), tf.argmax(predictions, axis=2)), tf.float32)
+        masked_correct_preds = tf.multiply(correct_preds, tf.transpose(sequence_mask, (1, 0)))
+        sum_correct_preds = tf.reduce_sum(masked_correct_preds)
+        accuracy = sum_correct_preds / tf.reduce_sum(sequence_mask)
+        # accuracy = tf.Print(accuracy, [accuracy])
 
         # compute bpc
         def log2(x):
@@ -472,7 +479,7 @@ class HMLSTMNetwork(object):
 
         while True:
             try:
-                inputs, _predictions, _embeddings, _hs, _states, _accuracy, _bpc = self._session.run([self.batch_in, predictions, embeddings, hs, states, accuracy, bpc])
+                _predictions, _embeddings, _hs, _states, _accuracy, _bpc = self._session.run([predictions, embeddings, hs, states, accuracy, bpc])
                 accuracies.append(_accuracy)
                 bpcs.append(_bpc)
                 # self._last_states = _states[-1, :, :]
