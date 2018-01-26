@@ -1,3 +1,7 @@
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+
+
 from .hmlstm_cell import HMLSTMCell, HMLSTMState
 from .multi_hmlstm_cell import MultiHMLSTMCell
 from tensorflow.python.ops import array_ops
