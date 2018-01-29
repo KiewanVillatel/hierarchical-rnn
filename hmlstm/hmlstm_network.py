@@ -117,6 +117,8 @@ class HMLSTMNetwork(object):
     self._initialize_gate_variables()
     self._initialize_embedding_variables()
 
+    self._saver = tf.train.Saver()
+
     self.init()
 
   def init_initial_states(self):
@@ -146,15 +148,20 @@ class HMLSTMNetwork(object):
         w_out_size = self._output_size if i == self._num_hidden_layers - 1 else self._out_hidden_size
         vs.get_variable(w_var_name, [w_in_size, w_out_size], dtype=tf.float32)
 
-  def load_variables(self):
-    saver = tf.train.Saver()
-    print('loading variables...')
-    saver.restore(self._session, self._variable_path)
+  def get_session(self):
+    session = self._session
+    while type(session).__name__ != 'Session':
+      # pylint: disable=W0212
+      session = session._sess
+    return session
 
-  def save_variables(self, path='./hmlstm_ckpt'):
-    saver = tf.train.Saver()
+  def load_variables(self):
+    print('loading variables...')
+    self._saver.restore(self.get_session(), self._variable_path)
+
+  def save_variables(self):
     print('saving variables...')
-    saver.save(self._session, path)
+    self._saver.save(self.get_session(), self._variable_path)
 
   def gate_input(self, hidden_states):
     '''
