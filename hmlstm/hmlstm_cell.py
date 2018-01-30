@@ -69,20 +69,13 @@ class HMLSTMCell(rnn_cell_impl.RNNCell):
             states = [s_recurrent, s_above, s_below]
 
             if self._residual:
-                with vs.variable_scope("residual"):
-                    new_h_tilde = s_recurrent
-                    for i in range(1):
-                        with vs.variable_scope("linear"+str(i)):
-                            length = self._num_units + 1
-                            concat = rnn_cell_impl._linear([new_h_tilde, s_above, s_below], length, bias=True,
-                                                           bias_initializer=bias_init)
-                            splits = tf.constant(([self._num_units]) + [1], dtype=tf.int32)
-                            new_h_tilde, z_tilde = array_ops.split(value=concat, num_or_size_splits=splits, axis=1)
-                            new_h_tilde = tf.nn.relu(new_h_tilde)
-                            z_tilde = z_tilde
-
-                    new_h = tf.tanh(h + new_h_tilde)
-                    new_c = new_h
+                new_h, new_c, z_tilde = self.calculate_new_residual_state(s_recurrent,
+                                                                          s_above,
+                                                                          s_below,
+                                                                          z,
+                                                                          zb,
+                                                                          h,
+                                                                          bias_init)
             else:
                 length = 4 * self._num_units + 1
 
@@ -158,10 +151,34 @@ class HMLSTMCell(rnn_cell_impl.RNNCell):
             tf.where(
                 tf.equal(zb, tf.constant(0., dtype=tf.float32)),  # [B]
                 tf.identity(c),  # [B, h_l], copy
-                tf.add(tf.multiply(f, c), tf.multiply(i, g)) # [B, h_l], update
+                tf.add(tf.multiply(f, c), tf.multiply(i, g))  # [B, h_l], update
             )
         )
         return new_c  # [B, h_l]
+
+    def calculate_new_residual_state(self, s_recurrent, s_above, s_below, z, zb, h, bias_init):
+        with vs.variable_scope("residual"):
+            new_h_tilde = s_recurrent
+            for i in range(1):
+                with vs.variable_scope("linear" + str(i)):
+                    length = self._num_units + 1
+                    concat = rnn_cell_impl._linear([new_h_tilde, s_above, s_below], length, bias=True,
+                                                   bias_initializer=bias_init)
+                    splits = tf.constant(([self._num_units]) + [1], dtype=tf.int32)
+                    new_h_tilde, z_tilde = array_ops.split(value=concat, num_or_size_splits=splits, axis=1)
+                    new_h_tilde = tf.nn.relu(new_h_tilde)
+
+            new_h = tf.where(
+                tf.equal(tf.squeeze(z, axis=[1]), tf.constant(1., dtype=tf.float32)),  # [B]
+                tf.tanh(new_h_tilde),  # [B, h_l], flush
+                tf.where(
+                    tf.equal(tf.squeeze(zb, axis=[1]), tf.constant(0., dtype=tf.float32)),  # [B]
+                    tf.identity(h),  # [B, h_l], copy
+                    tf.tanh(h + new_h_tilde)  # [B, h_l], update
+                )
+            )
+
+            return new_h, new_h, z_tilde
 
     def calculate_new_hidden_state(self, h, o, new_c, z, zb):
         '''
@@ -178,7 +195,8 @@ class HMLSTMCell(rnn_cell_impl.RNNCell):
                 tf.equal(zb, tf.constant(0., dtype=tf.float32))
             ),  # [B]
             tf.identity(h),  # [B, h_l], if copy
-            tf.multiply(o, tf.tanh(self._norm(new_c, 'new_c') if self._layer_norm else tf.tanh(new_c)))  # [B, h_l], otherwise
+            tf.multiply(o, tf.tanh(self._norm(new_c, 'new_c') if self._layer_norm else tf.tanh(new_c)))
+            # [B, h_l], otherwise
         )
         return new_h  # [B, h_l]
 
