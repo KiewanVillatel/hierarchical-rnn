@@ -117,8 +117,6 @@ class HMLSTMNetwork(object):
     self._initialize_gate_variables()
     self._initialize_embedding_variables()
 
-    self._saver = tf.train.Saver()
-
     self.init()
 
   def init_initial_states(self):
@@ -399,6 +397,8 @@ class HMLSTMNetwork(object):
     bpc = tf.multiply(self.batch_out, log_predictions)
     bpc = tf.reduce_sum(bpc, axis=2)
     bpc = -tf.reduce_mean(bpc)
+
+    self._saver = tf.train.Saver(tf.global_variables())
 
     return train, loss, indicators, predictions, embeded, hs, states, accuracy, bpc
 
