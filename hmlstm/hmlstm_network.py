@@ -8,6 +8,7 @@ from tensorflow.python.ops import array_ops
 from tensorflow.python.ops import variable_scope as vs
 import tensorflow as tf
 import numpy as np
+import sys
 
 
 class HMLSTMNetwork(object):
@@ -402,6 +403,7 @@ class HMLSTMNetwork(object):
 
     #compute gradient
     input_gradients = tf.stack([tf.gradients(prediction, self.unstacked_batch_in) for prediction in tf.unstack(predictions)])
+    input_gradients = tf.transpose(input_gradients, (3, 0, 1, 2))
 
     self._saver = tf.train.Saver(tf.global_variables())
 
@@ -496,7 +498,7 @@ class HMLSTMNetwork(object):
       losses.append(sum(epoch_losses))
     return losses
 
-  def predict_iterator(self, initializer, TBTT=False):
+  def predict_iterator(self, initializer, TBTT=False, lim_batch=sys.maxsize):
     self._session.run(initializer)
 
     _, _, _, predictions, embeddings, hs, states, accuracy, bpc, in_out_gradient = self._get_graph()
@@ -505,20 +507,27 @@ class HMLSTMNetwork(object):
 
     accuracies = []
     bpcs = []
-    in_out_gradients = []
+    in_out_gradients = None
+    preds = None
+    inputs = None
 
-    while True:
+    for i in range(0, lim_batch):
       try:
-        _predictions, _embeddings, _hs, _states, _accuracy, _bpc, _in_out_gradient = self._session.run(
-          [predictions, embeddings, hs, states, accuracy, bpc, in_out_gradient])
+        _inputs, _predictions, _embeddings, _hs, _states, _accuracy, _bpc, _in_out_gradient = self._session.run(
+          [self.batch_in, predictions, embeddings, hs, states, accuracy, bpc, in_out_gradient])
         if TBTT:
           self._session.run(self.assign_states_op)
         accuracies.append(_accuracy)
         bpcs.append(_bpc)
-        in_out_gradients.append(_in_out_gradient)
+        in_out_gradients = _in_out_gradient if in_out_gradients is None else np.concatenate((in_out_gradients, _in_out_gradient))
+        _predictions = _predictions.swapaxes(0, 1)
+        _inputs = _inputs.swapaxes(0, 1)
+        preds = _predictions if preds is None else np.concatenate((preds, _predictions))
+        inputs = _inputs if inputs is None else np.concatenate((inputs, _inputs))
+
       except tf.errors.OutOfRangeError:
         break
-    return np.mean(accuracies), np.mean(bpcs), np.asarray(in_out_gradients)
+    return np.mean(accuracies), np.mean(bpcs), inputs, preds, in_out_gradients
 
   def predict(self, batch, return_gradients=False, TBPTT=False):
     """
