@@ -28,6 +28,7 @@ class HMLSTMNetwork(object):
                variable_path='./vars',
                residual=False,
                last_layer_residual=False,
+               residual_depth=1,
                lr_start=0.01,
                lr_end=0.00001,
                lr_steps=1000,
@@ -55,6 +56,7 @@ class HMLSTMNetwork(object):
         task: string, one of 'regression' and 'classification'.
         """
 
+    self._residual_depth = residual_depth
     self._last_layer_residual = last_layer_residual
     self._residual = residual
     self._max_seq_length = max_seq_length
@@ -257,7 +259,7 @@ class HMLSTMNetwork(object):
 
       return HMLSTMCell(self._hidden_state_sizes[layer], batch_size,
                         h_below_size, h_above_size, reuse, layer_norm=self._layer_norm,
-                        recursion_depth=self._recursion_depth, residual=residual)
+                        recursion_depth=self._recursion_depth, residual=residual, residual_depth=self._residual_depth)
 
     hmlstm = MultiHMLSTMCell(
       [hmlstm_cell(l) for l in range(self._num_layers)], reuse)

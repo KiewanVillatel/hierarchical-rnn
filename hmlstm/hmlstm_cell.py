@@ -12,8 +12,10 @@ HMLSTMState = collections.namedtuple('HMLSTMCellState', ['c', 'h', 'z'])
 
 class HMLSTMCell(rnn_cell_impl.RNNCell):
     def __init__(self, num_units, batch_size, h_below_size, h_above_size,
-                 reuse, layer_norm=True, layer_norm_gain=1.0, layer_norm_shift=0.0, recursion_depth=2, residual=False):
+                 reuse, layer_norm=True, layer_norm_gain=1.0, layer_norm_shift=0.0, recursion_depth=2, residual=False,
+                 residual_depth=1):
         super(HMLSTMCell, self).__init__(_reuse=reuse)
+        self._residual_depth = residual_depth
         self._residual = residual
         self._num_units = num_units
         self._h_below_size = h_below_size
@@ -159,7 +161,7 @@ class HMLSTMCell(rnn_cell_impl.RNNCell):
     def calculate_new_residual_state(self, s_recurrent, s_above, s_below, z, zb, h, bias_init):
         with vs.variable_scope("residual"):
             new_h_tilde = s_recurrent
-            for i in range(1):
+            for i in range(self._residual_depth):
                 with vs.variable_scope("linear" + str(i)):
                     length = self._num_units + 1
                     concat = rnn_cell_impl._linear([new_h_tilde, s_above, s_below], length, bias=True,
