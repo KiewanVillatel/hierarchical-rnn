@@ -500,6 +500,30 @@ class HMLSTMNetwork(object):
       losses.append(sum(epoch_losses))
     return losses
 
+  def test(self, initializer, TBTT=False):
+    self._session.run(initializer)
+
+    _, _, _, _, _, _, _, accuracy, bpc, _ = self._get_graph()
+
+    self.init_initial_states()
+
+    accuracies = []
+    bpcs = []
+
+    while True:
+      try:
+        _accuracy, _bpc = self._session.run(
+          [self.batch_in, accuracy, bpc])
+        if TBTT:
+          self._session.run(self.assign_states_op)
+        accuracies.append(_accuracy)
+        bpcs.append(_bpc)
+
+      except tf.errors.OutOfRangeError:
+        break
+
+    return np.mean(accuracies), np.mean(bpcs)
+
   def predict_iterator(self, initializer, TBTT=False, lim_batch=sys.maxsize):
     self._session.run(initializer)
 
